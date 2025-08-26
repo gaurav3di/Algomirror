@@ -450,6 +450,9 @@ def option_chain_stream(underlying):
         import json
         import time
         
+        current_app.logger.info(f"[SSE] Starting stream for {underlying}")
+        current_app.logger.info(f"[SSE] Active managers: {list(option_chain_service.active_managers.keys())}")
+        
         while True:
             try:
                 # Check if option chain is active
@@ -457,22 +460,34 @@ def option_chain_stream(underlying):
                     manager = option_chain_service.active_managers[underlying]
                     chain_data = manager.get_option_chain()
                     
+                    # Log data being sent
+                    current_app.logger.debug(f"[SSE] Sending data for {underlying}, options count: {len(chain_data.get('options', []))}")
+                    
                     # Send as server-sent event
-                    yield f"data: {json.dumps(chain_data)}\n\n"
+                    data_json = json.dumps(chain_data)
+                    yield f"data: {data_json}\n\n"
                 else:
+                    current_app.logger.warning(f"[SSE] Option chain not active for {underlying}")
                     yield f"data: {json.dumps({'status': 'inactive', 'message': f'Option chain not active for {underlying}'})}\n\n"
                 
                 # Update every second
                 time.sleep(1)
                 
             except GeneratorExit:
+                current_app.logger.info(f"[SSE] Client disconnected from {underlying} stream")
                 break
             except Exception as e:
-                current_app.logger.error(f"Error streaming option chain: {e}")
+                current_app.logger.error(f"[SSE] Error streaming option chain: {e}")
                 yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
                 break
     
-    return Response(generate(), mimetype='text/event-stream')
+    response = Response(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Connection'] = 'keep-alive'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    return response
 
 
 @trading_bp.route('/api/option-chain/status')

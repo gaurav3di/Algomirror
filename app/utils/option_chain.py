@@ -268,7 +268,7 @@ class OptionChainManager:
             self.websocket_manager.subscribe(subscription)
     
     def batch_subscribe_options(self):
-        """Batch subscribe to all option strikes for efficiency"""
+        """Batch subscribe to all option strikes for both quote and depth"""
         if not self.websocket_manager:
             return
         
@@ -290,13 +290,13 @@ class OptionChainManager:
         batch_size = 20
         for i in range(0, len(instruments), batch_size):
             batch = instruments[i:i + batch_size]
-            logger.info(f"Subscribing to batch of {len(batch)} option instruments")
+            logger.info(f"Subscribing to batch of {len(batch)} option instruments in depth mode")
             
-            # Send batch subscription
+            # Subscribe to depth mode (includes quote data)
+            # Depth mode provides: LTP, Volume, Bid/Ask with quantities
             self.websocket_manager.subscribe_batch(batch, mode='depth')
             
-            # Minimal delay to prevent blocking
-            # Removed to allow Flask to start
+            # No delay to prevent blocking Flask startup
     
     def handle_depth_update(self, data):
         """

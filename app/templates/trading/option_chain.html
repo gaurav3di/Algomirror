@@ -79,7 +79,6 @@
             <thead>
                 <tr class="bg-base-200">
                     <!-- CE Side -->
-                    <th class="text-right">OI</th>
                     <th class="text-right">Volume</th>
                     <th class="text-right">Bid Qty</th>
                     <th class="text-right">Bid</th>
@@ -87,10 +86,11 @@
                     <th class="text-right">Ask</th>
                     <th class="text-right">Ask Qty</th>
                     <th class="text-right">Spread</th>
+                    <th class="text-center bg-base-300">CE Tag</th>
                     <!-- Strike Info -->
                     <th class="text-center bg-base-300 font-bold">Strike</th>
-                    <th class="text-center bg-base-300">Tag</th>
                     <!-- PE Side -->
+                    <th class="text-center bg-base-300">PE Tag</th>
                     <th class="text-left">Spread</th>
                     <th class="text-left">Ask Qty</th>
                     <th class="text-left">Ask</th>
@@ -98,15 +98,13 @@
                     <th class="text-left">Bid</th>
                     <th class="text-left">Bid Qty</th>
                     <th class="text-left">Volume</th>
-                    <th class="text-left">OI</th>
                 </tr>
             </thead>
             <tbody id="optionChainData">
                 {% for option in chain_data.options %}
                 <tr class="hover {% if option.tag == 'ATM' %}bg-primary/10 font-bold{% elif 'ITM' in option.tag %}bg-success/5{% else %}bg-warning/5{% endif %}"
                     data-strike="{{ option.strike }}" data-tag="{{ option.tag }}">
-                    <!-- CE Data -->
-                    <td class="text-right">{{ "{:,}".format(option.ce_data.oi) }}</td>
+                    <!-- CE Data (removed OI column) -->
                     <td class="text-right">{{ "{:,}".format(option.ce_data.volume) }}</td>
                     <td class="text-right">{{ option.ce_data.bid_qty }}</td>
                     <td class="text-right text-error">{{ "%.2f"|format(option.ce_data.bid) }}</td>
@@ -116,11 +114,18 @@
                     <td class="text-right {% if option.ce_data.spread > 1 %}text-warning{% else %}text-success{% endif %}">
                         {{ "%.2f"|format(option.ce_data.spread) }}
                     </td>
+                    <!-- CE Tag -->
+                    <td class="text-center bg-base-300">
+                        <span class="badge badge-sm {% if option.tag == 'ATM' %}badge-primary{% elif 'ITM' in option.tag %}badge-success{% else %}badge-warning{% endif %}">
+                            {{ option.tag }}
+                        </span>
+                    </td>
                     <!-- Strike -->
                     <td class="text-center bg-base-300 font-bold">{{ option.strike }}</td>
+                    <!-- PE Tag (ITM/OTM reversed for PE) -->
                     <td class="text-center bg-base-300">
-                        <span class="badge {% if option.tag == 'ATM' %}badge-primary{% elif 'ITM' in option.tag %}badge-success{% else %}badge-warning{% endif %}">
-                            {{ option.tag }}
+                        <span class="badge badge-sm {% if option.tag == 'ATM' %}badge-primary{% elif 'OTM' in option.tag %}badge-success{% else %}badge-warning{% endif %}">
+                            {% if option.tag == 'ATM' %}ATM{% elif 'ITM' in option.tag %}OTM{{ option.tag[3:] }}{% else %}ITM{{ option.tag[3:] }}{% endif %}
                         </span>
                     </td>
                     <!-- PE Data -->
@@ -133,7 +138,6 @@
                     <td class="text-left text-error">{{ "%.2f"|format(option.pe_data.bid) }}</td>
                     <td class="text-left">{{ option.pe_data.bid_qty }}</td>
                     <td class="text-left">{{ "{:,}".format(option.pe_data.volume) }}</td>
-                    <td class="text-left">{{ "{:,}".format(option.pe_data.oi) }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -217,8 +221,10 @@ function startRealTimeUpdates() {
     // Update status to connecting
     updateStatus('Connecting...', 'badge-warning');
     
-    // Create SSE connection - using the /stream/<underlying> endpoint
-    eventSource = new EventSource(`/trading/api/option-chain/stream/${underlying}`);
+    // Create SSE connection - using the /stream/<underlying> endpoint with credentials
+    eventSource = new EventSource(`/trading/api/option-chain/stream/${underlying}`, {
+        withCredentials: true
+    });
     
     eventSource.onopen = function() {
         console.log('SSE Connection opened');
@@ -226,19 +232,31 @@ function startRealTimeUpdates() {
     };
     
     eventSource.onmessage = function(event) {
+        console.log('[SSE] Message received:', event.data.substring(0, 200));
         try {
             const data = JSON.parse(event.data);
+            console.log('[SSE] Parsed data keys:', Object.keys(data));
+            console.log('[SSE] Data status:', data.status);
             
             if (data.status === 'inactive') {
-                console.log('Option chain inactive:', data.message);
+                console.log('[SSE] Option chain inactive:', data.message);
                 updateStatus('Inactive', 'badge-warning');
                 return;
             }
             
             if (data.status === 'error') {
-                console.error('SSE Error:', data.message);
+                console.error('[SSE] Error:', data.message);
                 updateStatus('Error', 'badge-error');
                 return;
+            }
+            
+            // Log what we're receiving
+            if (data.options) {
+                console.log('[SSE] Number of options:', data.options.length);
+                console.log('[SSE] First option:', data.options[0]);
+            }
+            if (data.underlying_ltp) {
+                console.log('[SSE] Underlying LTP:', data.underlying_ltp);
             }
             
             // Update the option chain display
@@ -246,7 +264,7 @@ function startRealTimeUpdates() {
             updateStatus('Connected', 'badge-success');
             document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
         } catch (e) {
-            console.error('Parse error:', e);
+            console.error('[SSE] Parse error:', e, 'Raw data:', event.data);
         }
     };
     
