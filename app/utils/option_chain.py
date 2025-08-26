@@ -228,9 +228,10 @@ class OptionChainManager:
             return
         
         # IMPORTANT: Register handlers BEFORE subscribing
-        logger.info(f"[REGISTER] Registering depth handler for {self.underlying} option chain")
+        logger.info(f"[REGISTER] Registering handlers for {self.underlying} option chain")
         self.websocket_manager.register_handler('depth', self.handle_depth_update)
-        logger.info(f"[REGISTER] Handler registered successfully")
+        self.websocket_manager.register_handler('quote', self.handle_quote_update)
+        logger.info(f"[REGISTER] Handlers registered successfully")
         
         # Ensure WebSocket is authenticated before subscribing
         if not self.websocket_manager.authenticated:
@@ -298,6 +299,33 @@ class OptionChainManager:
             self.websocket_manager.subscribe_batch(batch, mode='depth')
             
             # No delay to prevent blocking Flask startup
+    
+    def handle_quote_update(self, data):
+        """
+        Handle quote updates for underlying index (NIFTY/BANKNIFTY)
+        """
+        symbol = data.get('symbol', '')
+        
+        # Check if this is our underlying
+        if symbol == self.underlying:
+            ltp = data.get('ltp', 0)
+            if ltp:
+                self.underlying_ltp = float(ltp)
+                
+                # Update ATM strike based on new spot price
+                old_atm = self.atm_strike
+                self.atm_strike = self.calculate_atm_strike(self.underlying_ltp)
+                
+                if old_atm != self.atm_strike:
+                    logger.info(f"[ATM_UPDATE] ATM strike changed from {old_atm} to {self.atm_strike} (spot: {self.underlying_ltp})")
+                    # Optionally regenerate tags if ATM changes
+                    self.update_option_tags()
+                
+                logger.info(f"[QUOTE_UPDATE] {self.underlying} spot updated to {self.underlying_ltp}")
+                
+                # Also extract bid/ask if available
+                self.underlying_bid = float(data.get('bid', 0) or 0)
+                self.underlying_ask = float(data.get('ask', 0) or 0)
     
     def handle_depth_update(self, data):
         """
@@ -416,21 +444,43 @@ class OptionChainManager:
             'market_metrics': self.calculate_market_metrics()
         }
     
+    def update_option_tags(self):
+        """Update option tags when ATM changes"""
+        for strike_data in self.option_data.values():
+            strike = strike_data['strike']
+            position = self.get_strike_position(strike)
+            strike_data['position'] = position
+            strike_data['tag'] = self.get_position_tag(position)
+            
+            # Update PE tag (reversed)
+            if position == 0:
+                strike_data['pe_tag'] = 'ATM'
+            elif position > 0:
+                strike_data['pe_tag'] = f'OTM{abs(position)}'
+            else:
+                strike_data['pe_tag'] = f'ITM{abs(position)}'
+    
     def calculate_market_metrics(self):
         """Calculate PCR and other metrics"""
-        total_ce_volume = sum(opt['ce_data']['volume'] for opt in self.option_data.values())
-        total_pe_volume = sum(opt['pe_data']['volume'] for opt in self.option_data.values())
-        total_ce_oi = sum(opt['ce_data']['oi'] for opt in self.option_data.values())
-        total_pe_oi = sum(opt['pe_data']['oi'] for opt in self.option_data.values())
+        total_ce_volume = sum(opt['ce_data'].get('volume', 0) for opt in self.option_data.values())
+        total_pe_volume = sum(opt['pe_data'].get('volume', 0) for opt in self.option_data.values())
+        total_ce_oi = sum(opt['ce_data'].get('oi', 0) for opt in self.option_data.values())
+        total_pe_oi = sum(opt['pe_data'].get('oi', 0) for opt in self.option_data.values())
         
+        # Calculate PCR based on OI
         pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 0
+        
+        # Calculate volume-based PCR as well
+        pcr_volume = total_pe_volume / total_ce_volume if total_ce_volume > 0 else 0
         
         return {
             'total_ce_volume': total_ce_volume,
             'total_pe_volume': total_pe_volume,
+            'total_volume': total_ce_volume + total_pe_volume,
             'total_ce_oi': total_ce_oi,
             'total_pe_oi': total_pe_oi,
             'pcr': round(pcr, 2),
+            'pcr_volume': round(pcr_volume, 2),
             'max_pain': self.calculate_max_pain()
         }
     

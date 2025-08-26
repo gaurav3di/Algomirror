@@ -9,7 +9,9 @@
       "Bash(npx tailwindcss:*)",
       "Bash(taskkill:*)",
       "Bash(del create_favicons.py)",
-      "Bash(del instancealgomirror.db)"
+      "Bash(del instancealgomirror.db)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\templates\\trading/**)"
     ],
     "deny": [],
     "ask": []

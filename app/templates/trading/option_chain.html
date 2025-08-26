@@ -318,14 +318,47 @@ function updateOptionChain(data) {
 function updateMarketInfo(data) {
     // Update spot price
     const spotElement = document.querySelector('.stat-value.text-primary');
-    if (spotElement) {
-        spotElement.textContent = data.underlying_ltp.toFixed(2);
+    if (spotElement && data.underlying_ltp) {
+        const oldValue = parseFloat(spotElement.textContent) || 0;
+        const newValue = data.underlying_ltp;
+        spotElement.textContent = newValue.toFixed(2);
+        
+        // Add animation for spot price changes
+        if (oldValue !== newValue) {
+            spotElement.classList.add(newValue > oldValue ? 'text-success' : 'text-error');
+            setTimeout(() => {
+                spotElement.classList.remove('text-success', 'text-error');
+                spotElement.classList.add('text-primary');
+            }, 1000);
+        }
+    }
+    
+    // Update ATM strike
+    const atmElement = document.querySelector('.stat:nth-child(2) .stat-value');
+    if (atmElement && data.atm_strike) {
+        atmElement.textContent = data.atm_strike;
     }
     
     // Update PCR
-    const pcrElement = document.querySelector('.stat-value').nextElementSibling;
-    if (pcrElement && data.market_metrics.pcr) {
+    const pcrElement = document.querySelector('.stat:nth-child(3) .stat-value');
+    if (pcrElement && data.market_metrics && data.market_metrics.pcr !== undefined) {
         pcrElement.textContent = data.market_metrics.pcr.toFixed(2);
+        
+        // Update PCR color based on value
+        pcrElement.classList.remove('text-success', 'text-warning');
+        if (data.market_metrics.pcr > 1) {
+            pcrElement.classList.add('text-success');
+        } else {
+            pcrElement.classList.add('text-warning');
+        }
+    }
+    
+    // Update Total Volume
+    const volumeElement = document.querySelector('.stat:nth-child(4) .stat-value');
+    if (volumeElement && data.market_metrics) {
+        const ceVolume = data.market_metrics.total_ce_volume || 0;
+        const peVolume = data.market_metrics.total_pe_volume || 0;
+        volumeElement.innerHTML = `CE: ${ceVolume.toLocaleString()}<br>PE: ${peVolume.toLocaleString()}`;
     }
 }
 
