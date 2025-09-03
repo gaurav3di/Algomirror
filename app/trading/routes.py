@@ -244,6 +244,22 @@ def positions():
                     position['account_name'] = account.account_name
                     position['account_id'] = account.id
                     position['broker'] = account.broker_name
+                    
+                    # Calculate additional metrics for cached data
+                    try:
+                        qty = float(position.get('quantity', 0))
+                        avg_price = float(position.get('average_price', 0))
+                        ltp = float(position.get('ltp', 0))
+                        
+                        if qty != 0 and avg_price != 0:
+                            position['invested_value'] = abs(qty * avg_price)
+                            position['current_value'] = abs(qty * ltp)
+                            position['pnl_percentage'] = ((ltp - avg_price) / avg_price * 100) if avg_price else 0
+                    except (ValueError, TypeError):
+                        position['invested_value'] = 0
+                        position['current_value'] = 0
+                        position['pnl_percentage'] = 0
+                        
                 positions_data.extend(positions)
     
     # Calculate totals

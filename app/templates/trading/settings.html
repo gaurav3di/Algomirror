@@ -1,0 +1,409 @@
+{% extends "layout.html" %}
+
+{% block title %}Trading Settings - AlgoMirror{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <div class="flex justify-between items-center mb-8">
+        <h1 class="text-3xl font-bold">Trading Settings</h1>
+        <button onclick="resetSettings()" class="btn btn-warning btn-sm">
+            Reset to Defaults
+        </button>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- NIFTY Settings -->
+        <div class="card bg-base-200 shadow-xl">
+            <div class="card-body">
+                <h2 class="card-title text-primary">
+                    NIFTY Settings
+                    <div class="badge badge-primary">NSE</div>
+                </h2>
+                
+                <form id="niftyForm" class="space-y-4">
+                    <div class="form-control">
+                        <label class="label">
+                            <span class="label-text font-semibold">Lot Size</span>
+                            <span class="label-text-alt">Quantity per lot</span>
+                        </label>
+                        <input type="number" 
+                               id="nifty_lot_size" 
+                               name="lot_size" 
+                               class="input input-bordered"
+                               value="{{ nifty_settings.lot_size }}"
+                               min="1"
+                               max="1000"
+                               required>
+                        <label class="label">
+                            <span class="label-text-alt">Current: {{ nifty_settings.lot_size }}</span>
+                        </label>
+                    </div>
+                    
+                    <div class="form-control">
+                        <label class="label">
+                            <span class="label-text font-semibold">Freeze Quantity</span>
+                            <span class="label-text-alt">Max quantity per order</span>
+                        </label>
+                        <input type="number" 
+                               id="nifty_freeze_qty" 
+                               name="freeze_quantity" 
+                               class="input input-bordered"
+                               value="{{ nifty_settings.freeze_quantity }}"
+                               min="1"
+                               max="50000"
+                               required>
+                        <label class="label">
+                            <span class="label-text-alt">Current: {{ nifty_settings.freeze_quantity }}</span>
+                        </label>
+                    </div>
+                    
+                    <div class="stats stats-vertical lg:stats-horizontal shadow">
+                        <div class="stat">
+                            <div class="stat-title">Max Lots</div>
+                            <div class="stat-value text-primary" id="nifty_max_lots">
+                                {{ nifty_settings.max_lots_per_order }}
+                            </div>
+                            <div class="stat-desc">Per order</div>
+                        </div>
+                    </div>
+                    
+                    <div class="card-actions justify-end">
+                        <button type="submit" class="btn btn-primary">
+                            Save NIFTY Settings
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- BANKNIFTY Settings -->
+        <div class="card bg-base-200 shadow-xl">
+            <div class="card-body">
+                <h2 class="card-title text-secondary">
+                    BANKNIFTY Settings
+                    <div class="badge badge-secondary">NSE</div>
+                </h2>
+                
+                <form id="bankniftyForm" class="space-y-4">
+                    <div class="form-control">
+                        <label class="label">
+                            <span class="label-text font-semibold">Lot Size</span>
+                            <span class="label-text-alt">Quantity per lot</span>
+                        </label>
+                        <input type="number" 
+                               id="banknifty_lot_size" 
+                               name="lot_size" 
+                               class="input input-bordered"
+                               value="{{ banknifty_settings.lot_size }}"
+                               min="1"
+                               max="1000"
+                               required>
+                        <label class="label">
+                            <span class="label-text-alt">Current: {{ banknifty_settings.lot_size }}</span>
+                        </label>
+                    </div>
+                    
+                    <div class="form-control">
+                        <label class="label">
+                            <span class="label-text font-semibold">Freeze Quantity</span>
+                            <span class="label-text-alt">Max quantity per order</span>
+                        </label>
+                        <input type="number" 
+                               id="banknifty_freeze_qty" 
+                               name="freeze_quantity" 
+                               class="input input-bordered"
+                               value="{{ banknifty_settings.freeze_quantity }}"
+                               min="1"
+                               max="50000"
+                               required>
+                        <label class="label">
+                            <span class="label-text-alt">Current: {{ banknifty_settings.freeze_quantity }}</span>
+                        </label>
+                    </div>
+                    
+                    <div class="stats stats-vertical lg:stats-horizontal shadow">
+                        <div class="stat">
+                            <div class="stat-title">Max Lots</div>
+                            <div class="stat-value text-secondary" id="banknifty_max_lots">
+                                {{ banknifty_settings.max_lots_per_order }}
+                            </div>
+                            <div class="stat-desc">Per order</div>
+                        </div>
+                    </div>
+                    
+                    <div class="card-actions justify-end">
+                        <button type="submit" class="btn btn-secondary">
+                            Save BANKNIFTY Settings
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- SENSEX Settings -->
+        <div class="card bg-base-200 shadow-xl">
+            <div class="card-body">
+                <h2 class="card-title text-accent">
+                    SENSEX Settings
+                    <div class="badge badge-accent">BSE</div>
+                </h2>
+                
+                <form id="sensexForm" class="space-y-4">
+                    <div class="form-control">
+                        <label class="label">
+                            <span class="label-text font-semibold">Lot Size</span>
+                            <span class="label-text-alt">Quantity per lot</span>
+                        </label>
+                        <input type="number" 
+                               id="sensex_lot_size" 
+                               name="lot_size" 
+                               class="input input-bordered"
+                               value="{{ sensex_settings.lot_size }}"
+                               min="1"
+                               max="1000"
+                               required>
+                        <label class="label">
+                            <span class="label-text-alt">Current: {{ sensex_settings.lot_size }}</span>
+                        </label>
+                    </div>
+                    
+                    <div class="form-control">
+                        <label class="label">
+                            <span class="label-text font-semibold">Freeze Quantity</span>
+                            <span class="label-text-alt">Max quantity per order</span>
+                        </label>
+                        <input type="number" 
+                               id="sensex_freeze_qty" 
+                               name="freeze_quantity" 
+                               class="input input-bordered"
+                               value="{{ sensex_settings.freeze_quantity }}"
+                               min="1"
+                               max="50000"
+                               required>
+                        <label class="label">
+                            <span class="label-text-alt">Current: {{ sensex_settings.freeze_quantity }}</span>
+                        </label>
+                    </div>
+                    
+                    <div class="stats stats-vertical lg:stats-horizontal shadow">
+                        <div class="stat">
+                            <div class="stat-title">Max Lots</div>
+                            <div class="stat-value text-accent" id="sensex_max_lots">
+                                {{ sensex_settings.max_lots_per_order }}
+                            </div>
+                            <div class="stat-desc">Per order</div>
+                        </div>
+                    </div>
+                    
+                    <div class="card-actions justify-end">
+                        <button type="submit" class="btn btn-accent">
+                            Save SENSEX Settings
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Information Card -->
+    <div class="card bg-info text-info-content mt-6">
+        <div class="card-body">
+            <h3 class="card-title">Important Information</h3>
+            <ul class="list-disc list-inside space-y-2">
+                <li><strong>Lot Size:</strong> Number of shares/units in one lot of the index</li>
+                <li><strong>Freeze Quantity:</strong> Maximum quantity allowed in a single order by the exchange</li>
+                <li><strong>Max Lots:</strong> Automatically calculated (Freeze Quantity ÷ Lot Size)</li>
+                <li>These settings will be used for future order placement and position sizing</li>
+                <li>As per exchange circulars (May 2025): NIFTY lot size is 75, BANKNIFTY lot size is 35, SENSEX lot size is 20</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<script>
+// Calculate max lots on input change
+document.getElementById('nifty_lot_size').addEventListener('input', calculateNiftyMaxLots);
+document.getElementById('nifty_freeze_qty').addEventListener('input', calculateNiftyMaxLots);
+document.getElementById('banknifty_lot_size').addEventListener('input', calculateBankniftyMaxLots);
+document.getElementById('banknifty_freeze_qty').addEventListener('input', calculateBankniftyMaxLots);
+document.getElementById('sensex_lot_size').addEventListener('input', calculateSensexMaxLots);
+document.getElementById('sensex_freeze_qty').addEventListener('input', calculateSensexMaxLots);
+
+function calculateNiftyMaxLots() {
+    const lotSize = parseInt(document.getElementById('nifty_lot_size').value) || 1;
+    const freezeQty = parseInt(document.getElementById('nifty_freeze_qty').value) || 1;
+    const maxLots = Math.floor(freezeQty / lotSize) || 1;
+    document.getElementById('nifty_max_lots').textContent = maxLots;
+}
+
+function calculateBankniftyMaxLots() {
+    const lotSize = parseInt(document.getElementById('banknifty_lot_size').value) || 1;
+    const freezeQty = parseInt(document.getElementById('banknifty_freeze_qty').value) || 1;
+    const maxLots = Math.floor(freezeQty / lotSize) || 1;
+    document.getElementById('banknifty_max_lots').textContent = maxLots;
+}
+
+function calculateSensexMaxLots() {
+    const lotSize = parseInt(document.getElementById('sensex_lot_size').value) || 1;
+    const freezeQty = parseInt(document.getElementById('sensex_freeze_qty').value) || 1;
+    const maxLots = Math.floor(freezeQty / lotSize) || 1;
+    document.getElementById('sensex_max_lots').textContent = maxLots;
+}
+
+// Handle NIFTY form submission
+document.getElementById('niftyForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const lotSize = document.getElementById('nifty_lot_size').value;
+    const freezeQty = document.getElementById('nifty_freeze_qty').value;
+    
+    try {
+        const response = await fetch('/trading/settings/update', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCSRFToken()
+            },
+            body: JSON.stringify({
+                symbol: 'NIFTY',
+                lot_size: lotSize,
+                freeze_quantity: freezeQty
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showNotification('success', data.message);
+            // Update displayed values
+            document.querySelector('#niftyForm .label-text-alt').textContent = `Current: ${lotSize}`;
+        } else {
+            showNotification('error', data.message);
+        }
+    } catch (error) {
+        showNotification('error', 'Failed to update settings');
+    }
+});
+
+// Handle BANKNIFTY form submission
+document.getElementById('bankniftyForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const lotSize = document.getElementById('banknifty_lot_size').value;
+    const freezeQty = document.getElementById('banknifty_freeze_qty').value;
+    
+    try {
+        const response = await fetch('/trading/settings/update', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCSRFToken()
+            },
+            body: JSON.stringify({
+                symbol: 'BANKNIFTY',
+                lot_size: lotSize,
+                freeze_quantity: freezeQty
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showNotification('success', data.message);
+            // Update displayed values
+            document.querySelector('#bankniftyForm .label-text-alt').textContent = `Current: ${lotSize}`;
+        } else {
+            showNotification('error', data.message);
+        }
+    } catch (error) {
+        showNotification('error', 'Failed to update settings');
+    }
+});
+
+// Handle SENSEX form submission
+document.getElementById('sensexForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const lotSize = document.getElementById('sensex_lot_size').value;
+    const freezeQty = document.getElementById('sensex_freeze_qty').value;
+    
+    try {
+        const response = await fetch('/trading/settings/update', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCSRFToken()
+            },
+            body: JSON.stringify({
+                symbol: 'SENSEX',
+                lot_size: lotSize,
+                freeze_quantity: freezeQty
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showNotification('success', data.message);
+            // Update displayed values
+            document.querySelector('#sensexForm .label-text-alt').textContent = `Current: ${lotSize}`;
+        } else {
+            showNotification('error', data.message);
+        }
+    } catch (error) {
+        showNotification('error', 'Failed to update settings');
+    }
+});
+
+// Reset settings function
+async function resetSettings() {
+    if (!confirm('Are you sure you want to reset all settings to defaults?')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/trading/settings/reset', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCSRFToken()
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showNotification('success', data.message);
+            // Reload page to show default values
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            showNotification('error', data.message);
+        }
+    } catch (error) {
+        showNotification('error', 'Failed to reset settings');
+    }
+}
+
+// Get CSRF token
+function getCSRFToken() {
+    return document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+}
+
+// Show notification
+function showNotification(type, message) {
+    const alertClass = type === 'success' ? 'alert-success' : 'alert-error';
+    const alert = document.createElement('div');
+    alert.className = `alert ${alertClass} fixed top-4 right-4 w-auto z-50`;
+    alert.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                  d="${type === 'success' ? 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' : 'M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z'}" />
+        </svg>
+        <span>${message}</span>
+    `;
+    document.body.appendChild(alert);
+    
+    setTimeout(() => alert.remove(), 3000);
+}
+</script>
+{% endblock %}

@@ -11,6 +11,7 @@
             <select id="underlyingSelect" class="select select-bordered">
                 <option value="NIFTY" {% if underlying == 'NIFTY' %}selected{% endif %}>NIFTY</option>
                 <option value="BANKNIFTY" {% if underlying == 'BANKNIFTY' %}selected{% endif %}>BANKNIFTY</option>
+                <option value="SENSEX" {% if underlying == 'SENSEX' %}selected{% endif %}>SENSEX</option>
             </select>
             <select id="expirySelect" class="select select-bordered">
                 {% if available_expiries %}

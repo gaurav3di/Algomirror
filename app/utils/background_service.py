@@ -75,7 +75,7 @@ class OptionChainBackgroundService:
     def on_primary_account_connected(self, account: TradingAccount):
         """
         Called when primary account successfully connects
-        Automatically starts NIFTY and BANKNIFTY option chains
+        Automatically starts NIFTY, BANKNIFTY, and SENSEX option chains
         """
         try:
             logger.info(f"Primary account connected: {account.account_name}")
@@ -96,7 +96,8 @@ class OptionChainBackgroundService:
                     time_module.sleep(2)  # Give Flask time to start
                     self.start_option_chain('NIFTY')
                     self.start_option_chain('BANKNIFTY')
-                    logger.info("Option chains started automatically for NIFTY and BANKNIFTY")
+                    self.start_option_chain('SENSEX')
+                    logger.info("Option chains started automatically for NIFTY, BANKNIFTY, and SENSEX")
                 
                 thread = threading.Thread(target=start_chains)
                 thread.daemon = True
@@ -140,7 +141,7 @@ class OptionChainBackgroundService:
                 self.primary_account = next_account
                 
                 # Restart option chains with new account
-                for underlying in ['NIFTY', 'BANKNIFTY']:
+                for underlying in ['NIFTY', 'BANKNIFTY', 'SENSEX']:
                     if underlying in self.active_managers:
                         self.restart_option_chain(underlying)
                 

@@ -122,21 +122,21 @@
                                 </div>
                             </td>
                             {% endif %}
-                            <td class="font-semibold">{{ position.symbol }}</td>
-                            <td>{{ position.exchange }}</td>
-                            <td>{{ position.product }}</td>
-                            <td class="font-mono {{ 'text-success' if position.quantity|float > 0 else 'text-error' }}">
-                                {{ position.quantity }}
+                            <td class="font-semibold">{{ position.get('symbol', '') }}</td>
+                            <td>{{ position.get('exchange', '') }}</td>
+                            <td>{{ position.get('product', '') }}</td>
+                            <td class="font-mono {{ 'text-success' if position.get('quantity', 0)|float > 0 else 'text-error' }}">
+                                {{ position.get('quantity', 0) }}
                             </td>
-                            <td class="font-mono">₹{{ "%.2f"|format(position.average_price|float) if position.average_price else "0.00" }}</td>
-                            <td class="font-mono">₹{{ "%.2f"|format(position.ltp|float) if position.ltp else "0.00" }}</td>
-                            <td class="font-mono {{ 'text-success' if position.pnl|float >= 0 else 'text-error' }}">
-                                ₹{{ "%.2f"|format(position.pnl|float) if position.pnl else "0.00" }}
+                            <td class="font-mono">₹{{ "%.2f"|format(position.get('average_price', 0)|float) }}</td>
+                            <td class="font-mono">₹{{ "%.2f"|format(position.get('ltp', 0)|float) }}</td>
+                            <td class="font-mono {{ 'text-success' if position.get('pnl', 0)|float >= 0 else 'text-error' }}">
+                                ₹{{ "%.2f"|format(position.get('pnl', 0)|float) }}
                             </td>
-                            <td class="{{ 'text-success' if position.pnl_percentage|float >= 0 else 'text-error' }}">
-                                {{ "%.2f"|format(position.pnl_percentage|float) if position.pnl_percentage else "0.00" }}%
+                            <td class="{{ 'text-success' if position.get('pnl_percentage', 0)|float >= 0 else 'text-error' }}">
+                                {{ "%.2f"|format(position.get('pnl_percentage', 0)|float) }}%
                             </td>
-                            <td class="font-mono">₹{{ "%.2f"|format(position.current_value|float) if position.current_value else "0.00" }}</td>
+                            <td class="font-mono">₹{{ "%.2f"|format(position.get('current_value', 0)|float) }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>

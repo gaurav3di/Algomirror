@@ -278,6 +278,59 @@ class SpecialTradingSession(db.Model):
     def __repr__(self):
         return f'<SpecialTradingSession {self.session_date} - {self.session_name}>'
 
+class TradingSettings(db.Model):
+    __tablename__ = 'trading_settings'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # Fixed table name
+    symbol = db.Column(db.String(50), nullable=False)  # 'NIFTY', 'BANKNIFTY', 'SENSEX'
+    lot_size = db.Column(db.Integer, nullable=False, default=25)
+    freeze_quantity = db.Column(db.Integer, nullable=False, default=1800)
+    max_lots_per_order = db.Column(db.Integer, default=36)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationship
+    user = db.relationship('User', backref='trading_settings')
+    
+    # Unique constraint for user and symbol
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'symbol', name='_user_symbol_uc'),
+    )
+    
+    def __repr__(self):
+        return f'<TradingSettings {self.symbol} - Lot: {self.lot_size}, Freeze: {self.freeze_quantity}>'
+    
+    @staticmethod
+    def get_or_create_defaults(user_id):
+        """Create default settings for NIFTY, BANKNIFTY, and SENSEX if they don't exist"""
+        # Lot sizes from instructions.md (as of May 2025)
+        # Freeze quantities are based on exchange rules
+        defaults = [
+            {'symbol': 'NIFTY', 'lot_size': 75, 'freeze_quantity': 1800, 'max_lots_per_order': 24},
+            {'symbol': 'BANKNIFTY', 'lot_size': 35, 'freeze_quantity': 900, 'max_lots_per_order': 25},
+            {'symbol': 'SENSEX', 'lot_size': 20, 'freeze_quantity': 1000, 'max_lots_per_order': 50}
+        ]
+        
+        for default in defaults:
+            setting = TradingSettings.query.filter_by(
+                user_id=user_id, 
+                symbol=default['symbol']
+            ).first()
+            
+            if not setting:
+                setting = TradingSettings(
+                    user_id=user_id,
+                    symbol=default['symbol'],
+                    lot_size=default['lot_size'],
+                    freeze_quantity=default['freeze_quantity'],
+                    max_lots_per_order=default['max_lots_per_order']
+                )
+                db.session.add(setting)
+        
+        db.session.commit()
+
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))

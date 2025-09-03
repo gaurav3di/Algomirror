@@ -252,8 +252,11 @@ class OptionChainManager:
     def subscribe_underlying_quote(self):
         """Subscribe to underlying index in quote mode"""
         if self.websocket_manager:
+            # Determine exchange based on underlying
+            exchange = 'BSE_INDEX' if self.underlying == 'SENSEX' else 'NSE_INDEX'
+            
             subscription = {
-                'exchange': 'NSE_INDEX',
+                'exchange': exchange,
                 'symbol': self.underlying,
                 'mode': 'quote'
             }
@@ -262,9 +265,12 @@ class OptionChainManager:
     def subscribe_option_depth(self, symbol):
         """Subscribe to option symbol in depth mode"""
         if self.websocket_manager:
+            # Determine exchange based on underlying
+            exchange = 'BFO' if self.underlying == 'SENSEX' else 'NFO'
+            
             subscription = {
                 'symbol': symbol,
-                'exchange': 'NFO',
+                'exchange': exchange,
                 'mode': 'depth'
             }
             self.websocket_manager.subscribe(subscription)
@@ -274,18 +280,21 @@ class OptionChainManager:
         if not self.websocket_manager:
             return
         
+        # Determine exchange based on underlying
+        exchange = 'BFO' if self.underlying == 'SENSEX' else 'NFO'
+        
         # Build instruments list for batch subscription
         instruments = []
         for strike_data in self.option_data.values():
             # Add CE strike
             instruments.append({
                 'symbol': strike_data['ce_symbol'],
-                'exchange': 'NFO'
+                'exchange': exchange
             })
             # Add PE strike
             instruments.append({
                 'symbol': strike_data['pe_symbol'],
-                'exchange': 'NFO'
+                'exchange': exchange
             })
         
         # Subscribe in batches of 20 to avoid overwhelming the server
@@ -314,7 +323,7 @@ class OptionChainManager:
                 
                 # Update ATM strike based on new spot price
                 old_atm = self.atm_strike
-                self.atm_strike = self.calculate_atm_strike(self.underlying_ltp)
+                self.atm_strike = self.calculate_atm()
                 
                 if old_atm != self.atm_strike:
                     logger.info(f"[ATM_UPDATE] ATM strike changed from {old_atm} to {self.atm_strike} (spot: {self.underlying_ltp})")
