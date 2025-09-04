@@ -162,11 +162,20 @@ class OptionChainBackgroundService:
     def start_option_chain(self, underlying: str, expiry: str = None):
         """Start option chain monitoring for specified underlying and expiry"""
         if not self.primary_account:
-            logger.error("No primary account available")
-            return False
+            logger.warning("No primary account available, attempting failover")
+            # Try to failover to a backup account
+            if self.backup_accounts:
+                self.attempt_failover()
+                # After failover attempt, check if we have a primary now
+                if not self.primary_account:
+                    logger.error("Failover failed - no accounts available")
+                    return False
+            else:
+                logger.error("No primary or backup accounts available")
+                return False
         
         try:
-            # Create API client
+            # Create API client - try primary first, then backup
             client = ExtendedOpenAlgoAPI(
                 api_key=self.primary_account.get_api_key(),
                 host=self.primary_account.host_url
@@ -180,9 +189,30 @@ class OptionChainBackgroundService:
                     instrumenttype='options'
                 )
                 
+                # If primary fails, try backup accounts
                 if expiry_response.get('status') != 'success':
-                    logger.error(f"Failed to get expiry for {underlying}")
-                    return False
+                    logger.warning(f"Primary account failed to get expiry for {underlying}, trying backup accounts")
+                    
+                    for backup in self.backup_accounts:
+                        logger.info(f"Trying backup account: {backup.account_name}")
+                        backup_client = ExtendedOpenAlgoAPI(
+                            api_key=backup.get_api_key(),
+                            host=backup.host_url
+                        )
+                        
+                        expiry_response = backup_client.expiry(
+                            symbol=underlying,
+                            exchange='BFO' if underlying == 'SENSEX' else 'NFO',
+                            instrumenttype='options'
+                        )
+                        
+                        if expiry_response.get('status') == 'success':
+                            logger.info(f"Successfully got expiry from backup account: {backup.account_name}")
+                            client = backup_client  # Use backup client for further operations
+                            break
+                    else:
+                        logger.error(f"All accounts failed to get expiry for {underlying}")
+                        return False
                 
                 expiries = expiry_response.get('data', [])
                 if not expiries:
@@ -213,12 +243,18 @@ class OptionChainBackgroundService:
                         backup_accounts=self.backup_accounts
                     )
                     
-                    # Connect WebSocket
+                    # Connect WebSocket with failover support
                     if hasattr(self.primary_account, 'websocket_url'):
-                        ws_manager.connect(
+                        connected = ws_manager.connect(
                             ws_url=self.primary_account.websocket_url,
                             api_key=self.primary_account.get_api_key()
                         )
+                        
+                        # If primary failed, ws_manager would have tried failover
+                        # Check if we're now connected to a different account
+                        current_account = ws_manager.connection_pool.get('current_account')
+                        if current_account and current_account != self.primary_account:
+                            logger.info(f"WebSocket failover occurred: now using {current_account.account_name}")
                         
                         # Wait for authentication to complete (max 5 seconds)
                         auth_wait_time = 0
@@ -227,7 +263,7 @@ class OptionChainBackgroundService:
                             auth_wait_time += 0.5
                             
                         if not ws_manager.authenticated:
-                            logger.error(f"WebSocket authentication timeout for {underlying}")
+                            logger.error(f"WebSocket authentication failed for {underlying} after failover attempts")
                             all_managers_started = False
                             continue
                         

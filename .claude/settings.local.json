@@ -16,6 +16,11 @@
       "Read(/D:\\openalgo-multi\\Algomirror\\app/**)",
       "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
       "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\trading/**)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
+      "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)",
       "Read(/D:\\openalgo-multi\\Algomirror\\app\\utils/**)"
     ],
     "deny": [],

@@ -147,7 +147,7 @@ def create_app(config_name=None):
     from app.utils.background_service import option_chain_service
     option_chain_service.start_service()
     
-    # Load existing primary account within app context
+    # Load existing primary and backup accounts within app context
     with app.app_context():
         from app.models import TradingAccount
         primary = TradingAccount.query.filter_by(
@@ -155,8 +155,20 @@ def create_app(config_name=None):
             is_active=True
         ).first()
         
+        backup_accounts = TradingAccount.query.filter_by(
+            is_active=True,
+            is_primary=False
+        ).order_by(TradingAccount.created_at).all()
+        
         if primary:
             app.logger.info(f'Found primary account: {primary.account_name}')
+            if backup_accounts:
+                app.logger.info(f'Found {len(backup_accounts)} backup accounts')
+            
+            # Set primary and backup accounts
+            option_chain_service.primary_account = primary
+            option_chain_service.backup_accounts = backup_accounts.copy()
+            
             # Check if within trading hours and trigger option chains
             if primary.connection_status == 'connected':
                 option_chain_service.on_primary_account_connected(primary)

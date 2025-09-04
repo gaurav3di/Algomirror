@@ -165,6 +165,7 @@ class ProfessionalWebSocketManager:
             self.ws_url = ws_url
             self.api_key = api_key
             self.authenticated = False
+            self.connection_failed = False
             
             # Create WebSocket connection (no header auth - uses message auth)
             self.ws = websocket.WebSocketApp(
@@ -181,7 +182,13 @@ class ProfessionalWebSocketManager:
             self.ws_thread.start()
             
             # Wait for connection to establish
-            time.sleep(1)
+            time.sleep(2)
+            
+            # Check if connection was immediately refused
+            if self.connection_failed:
+                logger.warning("Connection immediately failed, triggering failover")
+                self.handle_connection_failure()
+                return False
             
             self.active = True
             logger.info("WebSocket connection established")
@@ -189,6 +196,7 @@ class ProfessionalWebSocketManager:
             
         except Exception as e:
             logger.error(f"Failed to connect WebSocket: {e}")
+            self.handle_connection_failure()
             return False
     
     def on_open(self, ws):
@@ -296,12 +304,18 @@ class ProfessionalWebSocketManager:
         """WebSocket error callback"""
         logger.error(f"WebSocket error: {error}")
         
+        # Check if this is a connection refused error
+        error_str = str(error)
+        if "10061" in error_str or "Connection refused" in error_str or "actively refused" in error_str:
+            self.connection_failed = True
+            logger.warning("Connection refused by server, marking for failover")
+        
         if self.connection_pool:
             self.connection_pool['metrics']['total_failures'] += 1
     
-    def on_close(self, ws):
+    def on_close(self, ws, close_status_code=None, close_msg=None):
         """WebSocket closed callback"""
-        logger.warning("WebSocket connection closed")
+        logger.warning(f"WebSocket connection closed - Code: {close_status_code}, Message: {close_msg}")
         
         if self.active:
             # Attempt reconnection
@@ -318,14 +332,25 @@ class ProfessionalWebSocketManager:
         """Reconnect with exponential backoff"""
         for attempt in range(self.reconnect_attempts):
             delay = self.backoff_strategy.get_next_delay()
-            logger.info(f"Reconnection attempt {attempt + 1} in {delay} seconds")
+            logger.info(f"Reconnection attempt {attempt + 1}/{self.reconnect_attempts} in {delay} seconds")
             time.sleep(delay)
             
-            if self.connect(self.ws_url, self.api_key):
-                logger.info("Reconnection successful")
-                return
+            try:
+                if self.connect(self.ws_url, self.api_key):
+                    logger.info("Reconnection successful")
+                    
+                    # Resubscribe to all previous subscriptions
+                    if self.subscriptions:
+                        logger.info(f"Resubscribing to {len(self.subscriptions)} symbols after reconnection")
+                        time.sleep(1)  # Wait for authentication
+                        for sub_str in list(self.subscriptions):
+                            subscription = json.loads(sub_str)
+                            self.subscribe(subscription)
+                    return
+            except Exception as e:
+                logger.error(f"Reconnection attempt {attempt + 1} failed: {e}")
         
-        logger.error("Max reconnection attempts reached")
+        logger.error(f"Max reconnection attempts ({self.reconnect_attempts}) reached, initiating failover")
         self.handle_connection_failure()
     
     def handle_connection_failure(self):
@@ -339,16 +364,37 @@ class ProfessionalWebSocketManager:
         
         if backup_accounts:
             next_account = backup_accounts[0]
-            logger.info(f"Switching to backup account: {next_account.name}")
+            logger.info(f"Switching to backup account: {next_account.account_name}")
             
             # Update connection pool
             self.connection_pool['current_account'] = next_account
             self.connection_pool['backup_accounts'] = backup_accounts[1:]
             self.connection_pool['metrics']['account_switches'] += 1
             
+            # Add failover event to history
+            current = self.connection_pool.get('current_account')
+            from_account_name = current.account_name if current and hasattr(current, 'account_name') else 'Unknown'
+            
+            self.connection_pool['failover_history'].append({
+                'timestamp': datetime.now().isoformat(),
+                'from_account': from_account_name,
+                'to_account': next_account.account_name,
+                'reason': 'Connection failure'
+            })
+            
             # Connect with new account
-            if hasattr(next_account, 'ws_host') and hasattr(next_account, 'get_api_key'):
-                self.connect(next_account.ws_host, next_account.get_api_key())
+            if hasattr(next_account, 'websocket_url') and hasattr(next_account, 'get_api_key'):
+                logger.info(f"Attempting to connect to backup WebSocket: {next_account.websocket_url}")
+                self.connect(next_account.websocket_url, next_account.get_api_key())
+                
+                # Resubscribe to all previous subscriptions
+                if self.subscriptions:
+                    logger.info(f"Resubscribing to {len(self.subscriptions)} symbols after failover")
+                    for sub_str in list(self.subscriptions):
+                        subscription = json.loads(sub_str)
+                        self.subscribe(subscription)
+            else:
+                logger.error(f"Backup account missing required attributes: websocket_url or get_api_key")
         else:
             logger.critical("No backup accounts available for failover")
     

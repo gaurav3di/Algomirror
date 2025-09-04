@@ -73,7 +73,14 @@ class OptionChainManager:
     def calculate_atm(self):
         """Determine ATM strike from underlying LTP"""
         try:
-            # Fetch underlying quote
+            # If we already have underlying_ltp from WebSocket, use it
+            if self.underlying_ltp and self.underlying_ltp > 0:
+                # Calculate ATM strike from existing LTP
+                self.atm_strike = round(self.underlying_ltp / self.strike_step) * self.strike_step
+                logger.info(f"{self.underlying} LTP: {self.underlying_ltp}, ATM: {self.atm_strike} (from cached)")
+                return self.atm_strike
+            
+            # Otherwise fetch underlying quote from API
             exchange = 'BSE_INDEX' if self.underlying == 'SENSEX' else 'NSE_INDEX'
             response = self.api_client.quotes(symbol=self.underlying, exchange=exchange)
             
@@ -84,9 +91,16 @@ class OptionChainManager:
                 self.underlying_ask = data.get('ask', self.underlying_ltp)
                 
                 # Calculate ATM strike
-                self.atm_strike = round(self.underlying_ltp / self.strike_step) * self.strike_step
-                logger.info(f"{self.underlying} LTP: {self.underlying_ltp}, ATM: {self.atm_strike}")
-                return self.atm_strike
+                if self.underlying_ltp > 0:
+                    self.atm_strike = round(self.underlying_ltp / self.strike_step) * self.strike_step
+                    logger.info(f"{self.underlying} LTP: {self.underlying_ltp}, ATM: {self.atm_strike} (from API)")
+                    return self.atm_strike
+                else:
+                    logger.warning(f"Invalid LTP received for {self.underlying}: {self.underlying_ltp}")
+                    return 0
+            else:
+                logger.warning(f"Failed to fetch quote for {self.underlying}: {response.get('message', 'Unknown error')}")
+                return 0
         except Exception as e:
             logger.error(f"Error calculating ATM: {e}")
             return 0
@@ -321,8 +335,17 @@ class OptionChainManager:
                 
                 if old_atm != self.atm_strike:
                     logger.info(f"[ATM_UPDATE] ATM strike changed from {old_atm} to {self.atm_strike} (spot: {self.underlying_ltp})")
-                    # Optionally regenerate tags if ATM changes
-                    self.update_option_tags()
+                    
+                    # If strikes haven't been generated yet (option_data is empty), generate them now
+                    if not self.option_data:
+                        logger.info(f"[STRIKE_GEN] Generating strikes for {self.underlying} with ATM {self.atm_strike}")
+                        self.generate_strikes()
+                        # Also setup subscriptions if not done yet
+                        if self.websocket_manager and self.websocket_manager.authenticated:
+                            self.batch_subscribe_options()
+                    else:
+                        # Update tags if strikes already exist
+                        self.update_option_tags()
                 
                 logger.debug(f"[QUOTE_UPDATE] {self.underlying} spot updated to {self.underlying_ltp}")
                 

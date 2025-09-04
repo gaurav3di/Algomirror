@@ -165,6 +165,10 @@ class PingMonitor:
                             self._log_activity(account, 'connection_failed', {'error': error_msg})
                             self._send_notification(account, 'error', 
                                                   f"✗ Connection failed: {account.account_name}")
+                            
+                            # Trigger failover if this is the primary account
+                            if account.is_primary:
+                                self._trigger_failover(account)
                     
                     elif failure_count == 1:
                         # First failure - send warning
@@ -184,6 +188,10 @@ class PingMonitor:
                         self._log_activity(account, 'connection_error', {'error': str(e)})
                         self._send_notification(account, 'error', 
                                               f"✗ Connection error: {account.account_name}")
+                        
+                        # Trigger failover if this is the primary account
+                        if account.is_primary:
+                            self._trigger_failover(account)
                 
                 # Only log warnings if not in quiet mode
                 if not self.app.config.get('PING_QUIET_MODE', False):
@@ -243,6 +251,32 @@ class PingMonitor:
             
         except Exception as e:
             current_app.logger.error(f"Failed to send notification: {str(e)}")
+    
+    def _trigger_failover(self, failed_account):
+        """Trigger failover in background service when primary account fails"""
+        try:
+            from app.utils.background_service import option_chain_service
+            
+            current_app.logger.warning(f"Triggering failover for primary account {failed_account.account_name}")
+            
+            # Notify background service of the disconnection
+            option_chain_service.on_account_disconnected(failed_account)
+            
+            # Log the failover
+            self._log_activity(
+                account=failed_account,
+                action='failover_triggered',
+                details={
+                    'reason': 'Primary account connection failed',
+                    'account_name': failed_account.account_name,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            )
+            
+            current_app.logger.info(f"Failover triggered successfully for {failed_account.account_name}")
+            
+        except Exception as e:
+            current_app.logger.error(f"Failed to trigger failover: {str(e)}")
     
     def get_account_status_summary(self, user_id):
         """Get summary of all account statuses for a user"""

@@ -501,12 +501,22 @@ def option_chain_stream(underlying):
                 # If no manager found, try to start one
                 if not manager and expiry:
                     print(f"[SSE] No manager found for {underlying}_{expiry}, attempting to start")
-                    # Use the primary account from background service instead of current_user
-                    if option_chain_service.primary_account:
-                        if option_chain_service.start_option_chain(underlying, expiry):
-                            manager_key = f"{underlying}_{expiry}"
-                            manager = option_chain_service.active_managers.get(manager_key)
-                            print(f"[SSE] Started new manager for {manager_key}")
+                    # Try to start option chain (will handle failover internally)
+                    if option_chain_service.start_option_chain(underlying, expiry):
+                        manager_key = f"{underlying}_{expiry}"
+                        manager = option_chain_service.active_managers.get(manager_key)
+                        print(f"[SSE] Started new manager for {manager_key}")
+                    else:
+                        print(f"[SSE] Failed to start option chain for {underlying}_{expiry} - checking for backup accounts")
+                        # If primary fails and we have backup accounts, trigger failover
+                        if option_chain_service.backup_accounts:
+                            print(f"[SSE] Attempting failover with {len(option_chain_service.backup_accounts)} backup accounts")
+                            option_chain_service.on_account_disconnected(option_chain_service.primary_account)
+                            # Try again after failover
+                            if option_chain_service.start_option_chain(underlying, expiry):
+                                manager_key = f"{underlying}_{expiry}"
+                                manager = option_chain_service.active_managers.get(manager_key)
+                                print(f"[SSE] Started manager after failover for {manager_key}")
                 
                 if manager:
                     chain_data = manager.get_option_chain()
