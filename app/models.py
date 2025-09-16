@@ -3,15 +3,22 @@ from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import os
+from dotenv import load_dotenv
 from app import db, login_manager
+
+# Load environment variables first
+load_dotenv()
 
 # Generate or load encryption key
 ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY')
 if not ENCRYPTION_KEY:
+    # If no key is set, generate one and save it for consistency
     ENCRYPTION_KEY = Fernet.generate_key()
+    print(f"WARNING: No ENCRYPTION_KEY found in .env file. Generated new key. Please add to .env file:")
+    print(f"ENCRYPTION_KEY={ENCRYPTION_KEY.decode()}")
     os.environ['ENCRYPTION_KEY'] = ENCRYPTION_KEY.decode()
 else:
-    ENCRYPTION_KEY = ENCRYPTION_KEY.encode()
+    ENCRYPTION_KEY = ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY
 
 cipher_suite = Fernet(ENCRYPTION_KEY)
 

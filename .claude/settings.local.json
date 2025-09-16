@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(\"D:\\openalgo-multi\\algomirror\\venv\\Scripts\\python.exe\" -c \"from pathlib import Path; print(''sqlite:///'' + str(Path(''D:/openalgo-multi/algomirror/instance/algomirror.db'').as_posix()))\")"
+      "Bash(\"D:\\openalgo-multi\\algomirror\\venv\\Scripts\\python.exe\" -c \"import os; from dotenv import load_dotenv; load_dotenv(); print(''ENCRYPTION_KEY exists:'', bool(os.environ.get(''ENCRYPTION_KEY''))); print(''First 10 chars:'', os.environ.get(''ENCRYPTION_KEY'', ''NOT SET'')[:10])\")"
     ],
     "deny": [],
     "ask": []
