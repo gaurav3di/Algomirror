@@ -46,6 +46,11 @@ class StrategyExecutor:
         # Ensure legs are loaded
         legs = self.strategy.legs.order_by(StrategyLeg.leg_number).all()
 
+        print(f"\n[EXECUTE START] Strategy {self.strategy.id} - {self.strategy.name}")
+        print(f"[EXECUTE] Found {len(legs)} legs:")
+        for leg in legs:
+            print(f"  Leg {leg.leg_number}: {leg.instrument} {leg.action} {leg.option_type} {leg.strike_selection} offset={leg.strike_offset}")
+
         if not legs:
             raise ValueError("No legs defined for this strategy")
 
@@ -71,6 +76,8 @@ class StrategyExecutor:
 
     def _execute_leg(self, leg: StrategyLeg) -> List[Dict[str, Any]]:
         """Execute a strategy leg across all accounts"""
+        print(f"[LEG DEBUG] Executing leg {leg.leg_number}: {leg.instrument} {leg.product_type} "
+              f"{leg.option_type} strike_selection={leg.strike_selection} offset={leg.strike_offset}")
         results = []
 
         # Build symbol based on leg configuration
@@ -185,10 +192,12 @@ class StrategyExecutor:
                 if leg.trigger_price:
                     order_params['trigger_price'] = leg.trigger_price
 
+            print(f"[ORDER PARAMS] Placing order for {account_name}: {order_params}")
             logger.debug(f"Order params: {order_params}")
 
             # Place order
             response = client.placeorder(**order_params)
+            print(f"[ORDER RESPONSE] {response}")
 
             if response.get('status') == 'success':
                 # Create execution record within app context
@@ -251,6 +260,9 @@ class StrategyExecutor:
     def _build_symbol(self, leg: StrategyLeg) -> str:
         """Build OpenAlgo symbol format based on leg configuration"""
         try:
+            logger.info(f"Building symbol for leg {leg.leg_number}: {leg.instrument} {leg.product_type} "
+                       f"strike_selection={leg.strike_selection} strike_offset={leg.strike_offset}")
+
             base_symbol = leg.instrument
 
             if not base_symbol:
@@ -267,6 +279,7 @@ class StrategyExecutor:
 
                 # Get strike price
                 strike = self._get_strike_price(leg)
+                logger.info(f"Got strike price: {strike} for {leg.strike_selection} offset={leg.strike_offset}")
 
                 if not strike or strike == "0":
                     logger.error(f"Failed to get strike price for leg {leg.leg_number}")
@@ -278,6 +291,8 @@ class StrategyExecutor:
 
                 # Build option symbol: NIFTY28MAR2420800CE
                 symbol = f"{base_symbol}{expiry}{strike}{leg.option_type}"
+                print(f"[SYMBOL BUILD] Base: {base_symbol}, Expiry: {expiry}, Strike: {strike}, Type: {leg.option_type}")
+                print(f"[FINAL SYMBOL] {symbol}")
                 logger.info(f"Built option symbol: {symbol}")
 
             elif leg.product_type == 'futures':
@@ -480,10 +495,18 @@ class StrategyExecutor:
 
             elif leg.strike_selection in ['ITM', 'OTM']:
                 # Get offset (1-20) from strike_offset field
-                offset = leg.strike_offset if leg.strike_offset else 0
+                offset = leg.strike_offset if leg.strike_offset else 1  # Default to 1 if not set, not 0
+
+                print(f"[STRIKE DEBUG] Strike selection: {leg.strike_selection}, Offset from DB: {leg.strike_offset}, Using offset: {offset}")
+                logger.info(f"Strike selection: {leg.strike_selection}, Offset from DB: {leg.strike_offset}, Using offset: {offset}")
+
+                # If offset is 0, it means we're at ATM which is wrong for ITM/OTM
+                if offset == 0:
+                    logger.warning(f"ITM/OTM selected but offset is 0, defaulting to 1")
+                    offset = 1
 
                 # Validate offset range (1-20)
-                offset = max(0, min(20, offset))
+                offset = max(1, min(20, offset))  # Changed min from 0 to 1
 
                 if leg.option_type == 'CE':
                     # For Call options
@@ -502,6 +525,8 @@ class StrategyExecutor:
                         # OTM puts are below spot
                         strike = atm_strike - (offset * strike_step)
 
+                print(f"[STRIKE RESULT] {leg.instrument} {leg.option_type}: Spot={spot_price}, ATM={atm_strike}, "
+                      f"{leg.strike_selection}{offset}={strike}")
                 logger.info(f"{leg.instrument} {leg.option_type}: Spot={spot_price}, ATM={atm_strike}, "
                           f"{leg.strike_selection}{offset}={strike}")
                 return str(strike)
@@ -521,6 +546,7 @@ class StrategyExecutor:
             if instrument in self.latest_prices:
                 price_info = self.latest_prices[instrument]
                 if price_info['timestamp'] and (datetime.utcnow() - price_info['timestamp']).seconds < 5:
+                    logger.info(f"Using WebSocket price for {instrument}: {price_info['ltp']}")
                     return price_info['ltp']
 
             # Check option chain service for cached underlying price
@@ -528,6 +554,7 @@ class StrategyExecutor:
             if underlying_key in option_chain_service.active_managers:
                 manager = option_chain_service.active_managers[underlying_key]
                 if manager and manager.underlying_ltp > 0:
+                    logger.info(f"Using option chain price for {instrument}: {manager.underlying_ltp}")
                     return manager.underlying_ltp
 
             # Fallback to API call
@@ -539,7 +566,11 @@ class StrategyExecutor:
 
                 response = client.quotes(symbol=instrument, exchange=exchange)
                 if response.get('status') == 'success':
-                    return response.get('data', {}).get('ltp', 0)
+                    ltp = response.get('data', {}).get('ltp', 0)
+                    logger.info(f"Using API price for {instrument}: {ltp}")
+                    return ltp
+                else:
+                    logger.error(f"API quote failed for {instrument}: {response.get('message')}")
 
         except Exception as e:
             logger.error(f"Error getting spot price for {instrument}: {e}")
@@ -631,15 +662,32 @@ class StrategyExecutor:
         return quantity_per_account
 
     def _get_lot_size(self, leg: StrategyLeg) -> int:
-        """Get lot size for instrument"""
-        lot_sizes = {
+        """Get lot size for instrument from database"""
+        from app.models import TradingSettings
+
+        # Try to get lot size from user's trading settings
+        if self.strategy.user_id:
+            setting = TradingSettings.query.filter_by(
+                user_id=self.strategy.user_id,
+                symbol=leg.instrument,
+                is_active=True
+            ).first()
+
+            if setting:
+                logger.info(f"Using lot size {setting.lot_size} for {leg.instrument} from database")
+                return setting.lot_size
+
+        # Fallback to defaults if not found (shouldn't happen if settings are initialized)
+        default_lot_sizes = {
             'NIFTY': 75,
-            'BANKNIFTY': 25,
+            'BANKNIFTY': 35,
             'FINNIFTY': 65,
             'MIDCPNIFTY': 75,
-            'SENSEX': 10
+            'SENSEX': 20
         }
-        return lot_sizes.get(leg.instrument, 1)
+        lot_size = default_lot_sizes.get(leg.instrument, 75)
+        logger.warning(f"Using default lot size {lot_size} for {leg.instrument}")
+        return lot_size
 
     def _start_exit_monitoring(self, execution: StrategyExecution):
         """Start monitoring position for exit conditions using WebSocket data"""

@@ -8,7 +8,9 @@
       "Bash(flask db:*)",
       "Bash(python:*)",
       "Bash(taskkill:*)",
-      "Bash(netstat:*)"
+      "Bash(netstat:*)",
+      "Bash(dir logs)",
+      "Bash(dir /s /b D:openalgo-multialgomirrorapp)"
     ],
     "deny": [],
     "ask": []

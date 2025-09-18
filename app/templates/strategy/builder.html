@@ -304,6 +304,48 @@
 
 <script>
 let legCount = 0;
+let lotSizes = {};  // Store lot sizes fetched from backend
+
+// Fetch lot sizes on page load
+async function fetchLotSizes() {
+    try {
+        const response = await fetch('/strategy/api/lot-sizes');
+        if (response.ok) {
+            const data = await response.json();
+            // Merge fetched data with defaults
+            lotSizes = {
+                'NIFTY': 75,
+                'BANKNIFTY': 35,
+                'FINNIFTY': 65,
+                'MIDCPNIFTY': 75,
+                'SENSEX': 20,
+                ...data  // Override with database values
+            };
+            console.log('Loaded lot sizes from database:', lotSizes);
+        } else {
+            // Use defaults if fetch fails
+            lotSizes = {
+                'NIFTY': 75,
+                'BANKNIFTY': 35,
+                'FINNIFTY': 65,
+                'MIDCPNIFTY': 75,
+                'SENSEX': 20
+            };
+            console.log('Using default lot sizes (fetch failed)');
+        }
+    } catch (error) {
+        console.error('Error fetching lot sizes:', error);
+        // Use defaults on error
+        lotSizes = {
+            'NIFTY': 75,
+            'BANKNIFTY': 35,
+            'FINNIFTY': 65,
+            'MIDCPNIFTY': 75,
+            'SENSEX': 20
+        };
+        console.log('Using default lot sizes (error occurred)');
+    }
+}
 
 // Add a new leg
 function addLeg() {
@@ -423,12 +465,11 @@ function saveStrategy(execute = false) {
         const lots = parseInt(legItem.querySelector('.leg-lots').value) || 1;
 
         // Calculate quantity based on instrument and lots
-        let lotSize = 15; // Default for NIFTY
+        // Use lot sizes from database (fetched on page load)
         const instrument = legItem.querySelector('.leg-instrument').value;
-        if (instrument === 'BANKNIFTY') lotSize = 15;
-        else if (instrument === 'FINNIFTY') lotSize = 25;
-        else if (instrument === 'MIDCPNIFTY') lotSize = 50;
-        else if (instrument === 'SENSEX') lotSize = 10;
+        let lotSize = lotSizes[instrument] || 75; // Use fetched lot size or default to 75
+        const calculatedQuantity = lots * lotSize;
+        console.log(`Leg ${index + 1}: ${instrument} - lots=${lots}, lotSize=${lotSize}, quantity=${calculatedQuantity}`);
 
         legs.push({
             instrument: instrument,
@@ -441,7 +482,7 @@ function saveStrategy(execute = false) {
             strike_offset: strikeOffset,
             premium_value: strikeSelect?.value === 'premium_near' ? parseFloat(strikeValue) : null,
             lots: lots,
-            quantity: lots * lotSize,  // Add quantity field
+            quantity: calculatedQuantity,  // Use calculated quantity
             order_type: orderType,
             price_condition: orderType === 'LIMIT' ? priceCondition : null,
             limit_price: limitPrice ? parseFloat(limitPrice) : null,
@@ -532,7 +573,10 @@ function showNotification(message, type) {
 }
 
 // Initialize with existing data or add first leg
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
+    // Fetch lot sizes from database first
+    await fetchLotSizes();
+
     console.log('Strategy object:', {{ 'true' if strategy else 'false' }});
     {% if strategy %}
         console.log('Strategy ID: {{ strategy.id }}');
@@ -553,7 +597,17 @@ document.addEventListener('DOMContentLoaded', function() {
             legItem.querySelector('.leg-product-type').value = '{{ leg.product_type }}';
             legItem.querySelector('.leg-expiry').value = '{{ leg.expiry }}';
             legItem.querySelector('.leg-action').value = '{{ leg.action }}';
-            legItem.querySelector('.leg-lots').value = {{ leg.lots or 1 }};
+
+            // Important: Use lots from database, not the stored quantity
+            // This ensures we use the correct lot size from TradingSettings
+            const lots = {{ leg.lots or 1 }};
+            legItem.querySelector('.leg-lots').value = lots;
+
+            // Recalculate quantity based on current lot size from database
+            const instrument = '{{ leg.instrument }}';
+            const lotSize = lotSizes[instrument] || 75;
+            console.log(`Leg {{ loop.index }}: Using lot size ${lotSize} for ${instrument}, lots=${lots}, calculated quantity=${lots * lotSize}`);
+
             legItem.querySelector('.leg-order-type').value = '{{ leg.order_type or "MARKET" }}';
 
             // Populate option fields if options

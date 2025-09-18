@@ -98,6 +98,10 @@ def builder(strategy_id=None):
 
             # Add strategy legs
             for i, leg_data in enumerate(data.get('legs', [])):
+                # Log the received data for debugging
+                logger.info(f"Saving leg {i+1}: instrument={leg_data.get('instrument')}, "
+                           f"lots={leg_data.get('lots')}, quantity={leg_data.get('quantity')}")
+
                 leg = StrategyLeg(
                     strategy_id=strategy.id,
                     leg_number=i + 1,
@@ -315,6 +319,38 @@ def toggle_strategy(strategy_id):
             'status': 'error',
             'message': str(e)
         }), 500
+
+@strategy_bp.route('/api/lot-sizes')
+@login_required
+def get_lot_sizes():
+    """Get lot sizes for all instruments from trading settings"""
+    from app.models import TradingSettings
+
+    # Get user's trading settings
+    settings = TradingSettings.query.filter_by(
+        user_id=current_user.id,
+        is_active=True
+    ).all()
+
+    # Create a dictionary of lot sizes
+    lot_sizes = {}
+    for setting in settings:
+        lot_sizes[setting.symbol] = setting.lot_size
+
+    # Add defaults for any missing instruments
+    defaults = {
+        'NIFTY': 75,
+        'BANKNIFTY': 35,
+        'FINNIFTY': 65,
+        'MIDCPNIFTY': 75,
+        'SENSEX': 20
+    }
+
+    for symbol, default_size in defaults.items():
+        if symbol not in lot_sizes:
+            lot_sizes[symbol] = default_size
+
+    return jsonify(lot_sizes)
 
 @strategy_bp.route('/templates')
 @login_required
