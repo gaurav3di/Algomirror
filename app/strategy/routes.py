@@ -384,6 +384,254 @@ def exit_strategy(strategy_id):
             'message': str(e)
         }), 500
 
+@strategy_bp.route('/<int:strategy_id>/leg/<int:leg_id>/cancel', methods=['POST'])
+@login_required
+@api_rate_limit()
+def cancel_leg_orders(strategy_id, leg_id):
+    """Cancel all open orders for a specific leg"""
+    try:
+        from app.utils.openalgo_client import ExtendedOpenAlgoAPI
+
+        strategy = Strategy.query.filter_by(
+            id=strategy_id,
+            user_id=current_user.id
+        ).first_or_404()
+
+        leg = StrategyLeg.query.filter_by(
+            id=leg_id,
+            strategy_id=strategy_id
+        ).first_or_404()
+
+        # Get all executions for this leg with status 'pending' (open orders)
+        pending_executions = StrategyExecution.query.filter_by(
+            strategy_id=strategy_id,
+            leg_id=leg_id,
+            status='pending'
+        ).all()
+
+        # Also check for 'entered' status with broker_order_status='open'
+        entered_executions = StrategyExecution.query.filter_by(
+            strategy_id=strategy_id,
+            leg_id=leg_id,
+            status='entered'
+        ).filter(StrategyExecution.broker_order_status == 'open').all()
+
+        all_pending = pending_executions + entered_executions
+
+        if not all_pending:
+            return jsonify({
+                'status': 'error',
+                'message': 'No pending orders found for this leg'
+            }), 400
+
+        cancelled_count = 0
+        failed_count = 0
+        errors = []
+
+        for execution in all_pending:
+            try:
+                account = execution.account
+                client = ExtendedOpenAlgoAPI(
+                    api_key=account.get_api_key(),
+                    host=account.host_url
+                )
+
+                # Cancel the order using OpenAlgo API
+                response = client.cancelorder(
+                    order_id=execution.order_id,
+                    strategy=strategy.name
+                )
+
+                if response.get('status') == 'success':
+                    # Update execution status
+                    execution.status = 'failed'
+                    execution.broker_order_status = 'cancelled'
+                    execution.exit_reason = 'manual_cancel'
+                    execution.exit_time = datetime.utcnow()
+                    cancelled_count += 1
+                    logger.info(f"Cancelled order {execution.order_id} for leg {leg_id}")
+                else:
+                    failed_count += 1
+                    error_msg = response.get('message', 'Unknown error')
+                    errors.append(f"Order {execution.order_id}: {error_msg}")
+                    logger.error(f"Failed to cancel order {execution.order_id}: {error_msg}")
+
+            except Exception as e:
+                failed_count += 1
+                errors.append(f"Order {execution.order_id}: {str(e)}")
+                logger.error(f"Exception cancelling order {execution.order_id}: {e}")
+
+        db.session.commit()
+
+        if cancelled_count > 0 and failed_count == 0:
+            return jsonify({
+                'status': 'success',
+                'message': f'Cancelled {cancelled_count} order(s) for leg {leg.leg_number}',
+                'cancelled': cancelled_count
+            })
+        elif cancelled_count > 0:
+            return jsonify({
+                'status': 'partial',
+                'message': f'Cancelled {cancelled_count} order(s), {failed_count} failed',
+                'cancelled': cancelled_count,
+                'failed': failed_count,
+                'errors': errors
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to cancel all orders',
+                'cancelled': 0,
+                'failed': failed_count,
+                'errors': errors
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error cancelling leg orders: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@strategy_bp.route('/<int:strategy_id>/leg/<int:leg_id>/modify', methods=['POST'])
+@login_required
+@api_rate_limit()
+def modify_leg_orders(strategy_id, leg_id):
+    """Modify the price of all open orders for a specific leg"""
+    try:
+        from app.utils.openalgo_client import ExtendedOpenAlgoAPI
+
+        data = request.get_json()
+        new_price = data.get('price')
+
+        if not new_price:
+            return jsonify({
+                'status': 'error',
+                'message': 'New price is required'
+            }), 400
+
+        try:
+            new_price = float(new_price)
+            if new_price <= 0:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Price must be greater than 0'
+                }), 400
+        except ValueError:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid price format'
+            }), 400
+
+        strategy = Strategy.query.filter_by(
+            id=strategy_id,
+            user_id=current_user.id
+        ).first_or_404()
+
+        leg = StrategyLeg.query.filter_by(
+            id=leg_id,
+            strategy_id=strategy_id
+        ).first_or_404()
+
+        # Get all executions for this leg with status 'pending' (open orders)
+        pending_executions = StrategyExecution.query.filter_by(
+            strategy_id=strategy_id,
+            leg_id=leg_id,
+            status='pending'
+        ).all()
+
+        # Also check for 'entered' status with broker_order_status='open'
+        entered_executions = StrategyExecution.query.filter_by(
+            strategy_id=strategy_id,
+            leg_id=leg_id,
+            status='entered'
+        ).filter(StrategyExecution.broker_order_status == 'open').all()
+
+        all_pending = pending_executions + entered_executions
+
+        if not all_pending:
+            return jsonify({
+                'status': 'error',
+                'message': 'No pending orders found for this leg'
+            }), 400
+
+        modified_count = 0
+        failed_count = 0
+        errors = []
+
+        for execution in all_pending:
+            try:
+                account = execution.account
+                client = ExtendedOpenAlgoAPI(
+                    api_key=account.get_api_key(),
+                    host=account.host_url
+                )
+
+                # Modify the order using OpenAlgo API
+                response = client.modifyorder(
+                    order_id=execution.order_id,
+                    strategy=strategy.name,
+                    symbol=leg.symbol,
+                    action=leg.action,
+                    exchange=leg.exchange,
+                    price_type='LIMIT',
+                    product=leg.product,
+                    quantity=leg.quantity,
+                    price=new_price
+                )
+
+                if response.get('status') == 'success':
+                    # Update execution with new price
+                    execution.entry_price = new_price
+                    modified_count += 1
+                    logger.info(f"Modified order {execution.order_id} for leg {leg_id} to price {new_price}")
+                else:
+                    failed_count += 1
+                    error_msg = response.get('message', 'Unknown error')
+                    errors.append(f"Order {execution.order_id}: {error_msg}")
+                    logger.error(f"Failed to modify order {execution.order_id}: {error_msg}")
+
+            except Exception as e:
+                failed_count += 1
+                errors.append(f"Order {execution.order_id}: {str(e)}")
+                logger.error(f"Exception modifying order {execution.order_id}: {e}")
+
+        # Update leg limit price
+        if modified_count > 0:
+            leg.limit_price = new_price
+
+        db.session.commit()
+
+        if modified_count > 0 and failed_count == 0:
+            return jsonify({
+                'status': 'success',
+                'message': f'Modified {modified_count} order(s) for leg {leg.leg_number} to ₹{new_price}',
+                'modified': modified_count
+            })
+        elif modified_count > 0:
+            return jsonify({
+                'status': 'partial',
+                'message': f'Modified {modified_count} order(s), {failed_count} failed',
+                'modified': modified_count,
+                'failed': failed_count,
+                'errors': errors
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to modify all orders',
+                'modified': 0,
+                'failed': failed_count,
+                'errors': errors
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error modifying leg orders: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
 @strategy_bp.route('/delete/<int:strategy_id>', methods=['DELETE'])
 @login_required
 def delete_strategy(strategy_id):
@@ -590,7 +838,9 @@ def strategy_orderbook(strategy_id):
             'pricetype': execution.leg.order_type or 'MARKET',
             'order_status': order_status,
             'trigger_price': 0.0,
-            'timestamp': utc_to_ist(execution.entry_time).strftime('%d-%b-%Y %H:%M:%S') if execution.entry_time else ""
+            'timestamp': utc_to_ist(execution.entry_time).strftime('%d-%b-%Y %H:%M:%S') if execution.entry_time else "",
+            'leg_id': execution.leg_id,
+            'leg_number': execution.leg.leg_number if execution.leg else None
         })
 
         # If position was exited, add the exit order as a separate order

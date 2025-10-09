@@ -285,7 +285,7 @@
 
 <script>
 // Trading hours management
-let isTradingHours = false;
+let isTradingHours = null; // null = not yet checked, true/false after first check
 let pollingIntervals = {
     metrics: null,
     funds: null,
@@ -557,16 +557,30 @@ async function checkTradingHours() {
 
         if (data.status === 'success') {
             const wasTradingHours = isTradingHours;
+            const isFirstLoad = isTradingHours === null;
             isTradingHours = data.data.is_trading_hours;
 
             // If trading hours status changed, update polling
-            if (wasTradingHours !== isTradingHours) {
+            if (wasTradingHours !== isTradingHours && !isFirstLoad) {
                 if (isTradingHours) {
                     console.log('📈 Market opened - Starting real-time updates');
                     startPolling();
                 } else {
                     console.log('📉 Market closed - Stopping real-time updates');
                     stopPolling();
+                }
+            }
+
+            // On first load, always load data once (whether market is open or closed)
+            if (isFirstLoad) {
+                console.log(isTradingHours ? '📈 Market is open - Starting real-time updates' : '📉 Market is closed - Loading cached data');
+                if (isTradingHours) {
+                    startPolling();
+                } else {
+                    // Load data once even if market is closed (shows cached data)
+                    loadStrategyMetrics();
+                    loadAccountFunds();
+                    loadAccountPnL();
                 }
             }
 

@@ -314,11 +314,19 @@
                 Leg <span class="leg-number">1</span>
                 <span class="leg-status-badge badge badge-sm badge-success ml-2" style="display:none;">EXECUTED</span>
             </h3>
-            <button type="button" onclick="removeLeg(this)" class="btn btn-ghost btn-sm leg-remove-btn">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                </svg>
-            </button>
+            <div class="flex gap-2">
+                <button type="button" onclick="modifyLegPrice(this)" class="btn btn-warning btn-sm leg-modify-btn" style="display:none;">
+                    Modify Price
+                </button>
+                <button type="button" onclick="cancelLegOrder(this)" class="btn btn-error btn-sm leg-cancel-btn" style="display:none;">
+                    Cancel Order
+                </button>
+                <button type="button" onclick="removeLeg(this)" class="btn btn-ghost btn-sm leg-remove-btn">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -574,15 +582,25 @@ function togglePriceFields(selectElement) {
 }
 
 // Freeze/unfreeze leg (disable/enable all inputs)
-function freezeLeg(legItem, isExecuted) {
+// isPending: true for open LIMIT orders, false for filled orders
+function freezeLeg(legItem, isExecuted, isPending = false) {
     legItem.dataset.isExecuted = isExecuted ? 'true' : 'false';
+    legItem.dataset.isPending = isPending ? 'true' : 'false';
 
-    if (isExecuted) {
-        // Show executed badge
+    if (isExecuted || isPending) {
+        // Show appropriate badge
         const badge = legItem.querySelector('.leg-status-badge');
         if (badge) {
             badge.style.display = 'inline-block';
-            badge.classList.add('badge-success');
+            if (isPending) {
+                badge.classList.remove('badge-success');
+                badge.classList.add('badge-warning');
+                badge.textContent = 'PENDING';
+            } else {
+                badge.classList.remove('badge-warning');
+                badge.classList.add('badge-success');
+                badge.textContent = 'EXECUTED';
+            }
         }
 
         // Disable all inputs and selects
@@ -591,24 +609,58 @@ function freezeLeg(legItem, isExecuted) {
             element.classList.add('cursor-not-allowed');
         });
 
+        // For pending orders, re-enable limit price field
+        if (isPending) {
+            const limitPriceField = legItem.querySelector('.leg-limit-price');
+            if (limitPriceField) {
+                limitPriceField.disabled = false;
+                limitPriceField.classList.remove('cursor-not-allowed');
+            }
+
+            // Show modify and cancel buttons for pending orders
+            const modifyBtn = legItem.querySelector('.leg-modify-btn');
+            const cancelBtn = legItem.querySelector('.leg-cancel-btn');
+            if (modifyBtn) {
+                modifyBtn.style.display = 'inline-block';
+            }
+            if (cancelBtn) {
+                cancelBtn.style.display = 'inline-block';
+            }
+        }
+
         // Hide remove button
         const removeBtn = legItem.querySelector('.leg-remove-btn');
         if (removeBtn) {
             removeBtn.style.display = 'none';
         }
 
-        // Add visual indicator (grayed out with green border)
-        legItem.style.opacity = '0.85';
-        legItem.style.backgroundColor = '#f0fdf4';
-        legItem.style.borderColor = '#22c55e';
-        legItem.style.borderWidth = '2px';
+        // Add visual indicator
+        if (isPending) {
+            // Yellow tint for pending
+            legItem.style.opacity = '0.9';
+            legItem.style.backgroundColor = '#fefce8';
+            legItem.style.borderColor = '#eab308';
+            legItem.style.borderWidth = '2px';
+        } else {
+            // Green tint for executed
+            legItem.style.opacity = '0.85';
+            legItem.style.backgroundColor = '#f0fdf4';
+            legItem.style.borderColor = '#22c55e';
+            legItem.style.borderWidth = '2px';
+        }
         legItem.classList.add('leg-frozen');
     } else {
-        // Hide executed badge
+        // Hide badge
         const badge = legItem.querySelector('.leg-status-badge');
         if (badge) {
             badge.style.display = 'none';
-            badge.classList.remove('badge-success');
+            badge.classList.remove('badge-success', 'badge-warning');
+        }
+
+        // Hide cancel button
+        const cancelBtn = legItem.querySelector('.leg-cancel-btn');
+        if (cancelBtn) {
+            cancelBtn.style.display = 'none';
         }
 
         // Enable all inputs and selects
@@ -628,6 +680,266 @@ function freezeLeg(legItem, isExecuted) {
         legItem.style.borderWidth = '';
         legItem.classList.remove('leg-frozen');
     }
+}
+
+// Cancel pending order for a leg
+async function cancelLegOrder(button) {
+    const legItem = button.closest('.leg-item');
+    const legNumber = legItem.querySelector('.leg-number').textContent;
+
+    if (!confirm(`Cancel pending order for Leg ${legNumber}?`)) {
+        return;
+    }
+
+    try {
+        // Get leg ID from execution data
+        const legId = legItem.dataset.legId;
+        if (!legId) {
+            showNotification('Cannot find leg ID for cancellation', 'error');
+            return;
+        }
+
+        const strategyId = {{ strategy.id if strategy else 'null' }};
+        if (!strategyId) {
+            showNotification('Strategy ID not found', 'error');
+            return;
+        }
+
+        const response = await fetch(`/strategy/${strategyId}/leg/${legId}/cancel`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content
+            }
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            showNotification('Order cancelled successfully', 'success');
+            // Unfreeze the leg
+            freezeLeg(legItem, false, false);
+            // Reload strategy data
+            loadStrategyData();
+        } else {
+            showNotification(data.message || 'Failed to cancel order', 'error');
+        }
+    } catch (error) {
+        console.error('Error cancelling order:', error);
+        showNotification('Error cancelling order', 'error');
+    }
+}
+
+// Modify limit price for pending order
+async function modifyLegPrice(button) {
+    const legItem = button.closest('.leg-item');
+    const legNumber = legItem.querySelector('.leg-number').textContent;
+    const limitPriceInput = legItem.querySelector('.leg-limit-price');
+    const newPrice = limitPriceInput.value;
+
+    if (!newPrice || parseFloat(newPrice) <= 0) {
+        showNotification('Please enter a valid price', 'error');
+        return;
+    }
+
+    if (!confirm(`Modify pending order for Leg ${legNumber} to ₹${newPrice}?`)) {
+        return;
+    }
+
+    try {
+        // Get leg ID from execution data
+        const legId = legItem.dataset.legId;
+        if (!legId) {
+            showNotification('Cannot find leg ID for modification', 'error');
+            return;
+        }
+
+        const strategyId = {{ strategy.id if strategy else 'null' }};
+        if (!strategyId) {
+            showNotification('Strategy ID not found', 'error');
+            return;
+        }
+
+        const response = await fetch(`/strategy/${strategyId}/leg/${legId}/modify`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content
+            },
+            body: JSON.stringify({
+                price: parseFloat(newPrice)
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success' || data.status === 'partial') {
+            showNotification(data.message || 'Order price modified successfully', 'success');
+            // Reload strategy data
+            loadStrategyData();
+        } else {
+            showNotification(data.message || 'Failed to modify order price', 'error');
+            if (data.errors && data.errors.length > 0) {
+                console.error('Modification errors:', data.errors);
+            }
+        }
+    } catch (error) {
+        console.error('Error modifying order:', error);
+        showNotification('Failed to modify order price', 'error');
+    }
+}
+
+// Poll order status every 5 seconds for pending orders
+let statusPollingInterval = null;
+
+function startStatusPolling() {
+    // Clear any existing interval
+    if (statusPollingInterval) {
+        clearInterval(statusPollingInterval);
+    }
+
+    {% if strategy %}
+    const strategyId = {{ strategy.id }};
+
+    // Poll every 5 seconds
+    statusPollingInterval = setInterval(async () => {
+        try {
+            // Check if there are any pending legs
+            const pendingLegs = document.querySelectorAll('.leg-item[data-is-pending="true"]');
+            if (pendingLegs.length === 0) {
+                // No pending legs, stop polling
+                console.log('No pending legs, stopping status polling');
+                clearInterval(statusPollingInterval);
+                statusPollingInterval = null;
+                return;
+            }
+
+            console.log(`Polling status for ${pendingLegs.length} pending legs`);
+
+            // Fetch latest orderbook
+            const response = await fetch(`/strategy/${strategyId}/orderbook`);
+            const data = await response.json();
+
+            if (data.status === 'success' && data.data) {
+                const orders = data.data.orders || [];
+
+                // Update leg status based on order status
+                pendingLegs.forEach(legItem => {
+                    // Get leg number from displayed text
+                    const legNumber = parseInt(legItem.querySelector('.leg-number').textContent);
+                    if (!legNumber) return;
+
+                    // Find orders for this leg by leg_number
+                    const legOrders = orders.filter(o => o.leg_number == legNumber);
+                    if (legOrders.length === 0) return;
+
+                    // Store leg_id if not already set
+                    if (legOrders[0].leg_id && !legItem.dataset.legId) {
+                        legItem.dataset.legId = legOrders[0].leg_id;
+                    }
+
+                    // Check if all orders are complete or failed
+                    const allComplete = legOrders.every(o => o.order_status === 'complete');
+                    const allFailed = legOrders.every(o => ['rejected', 'cancelled'].includes(o.order_status));
+                    const anyOpen = legOrders.some(o => o.order_status === 'open');
+
+                    if (allComplete) {
+                        // Mark as executed
+                        console.log(`Leg ${legNumber} is now complete`);
+                        freezeLeg(legItem, true, false);
+                        legItem.dataset.isPending = 'false';
+                        legItem.dataset.isExecuted = 'true';
+                        showNotification(`Leg ${legNumber} order filled`, 'success');
+                    } else if (allFailed) {
+                        // Unfreeze the leg
+                        console.log(`Leg ${legNumber} orders failed, unfreezing`);
+                        freezeLeg(legItem, false, false);
+                        legItem.dataset.isPending = 'false';
+                        showNotification(`Leg ${legNumber} order failed`, 'error');
+                    }
+                    // If still open, keep as pending
+                });
+
+                // Reload data to update tables
+                loadStrategyData();
+            }
+        } catch (error) {
+            console.error('Error polling order status:', error);
+        }
+    }, 5000); // 5 seconds
+
+    console.log('Status polling started (every 5 seconds)');
+    {% endif %}
+}
+
+function stopStatusPolling() {
+    if (statusPollingInterval) {
+        clearInterval(statusPollingInterval);
+        statusPollingInterval = null;
+        console.log('Status polling stopped');
+    }
+}
+
+// Check orderbook and freeze legs with pending orders
+async function checkAndFreezePendingLegs() {
+    {% if strategy %}
+    const strategyId = {{ strategy.id }};
+
+    try {
+        const response = await fetch(`/strategy/${strategyId}/orderbook`);
+        const data = await response.json();
+
+        if (data.status === 'success' && data.data) {
+            const orders = data.data.orders || [];
+
+            // Group orders by leg_number (more reliable than leg_id for new strategies)
+            const ordersByLegNumber = {};
+            orders.forEach(order => {
+                if (!order.leg_number) return;
+                if (!ordersByLegNumber[order.leg_number]) {
+                    ordersByLegNumber[order.leg_number] = [];
+                }
+                ordersByLegNumber[order.leg_number].push(order);
+            });
+
+            // Check each leg
+            document.querySelectorAll('.leg-item').forEach(legItem => {
+                // Get leg number from the displayed number
+                const legNumber = parseInt(legItem.querySelector('.leg-number').textContent);
+                if (!legNumber) return;
+
+                // Store leg_id from first order if not already set
+                const legOrders = ordersByLegNumber[legNumber] || [];
+                if (legOrders.length > 0 && legOrders[0].leg_id && !legItem.dataset.legId) {
+                    legItem.dataset.legId = legOrders[0].leg_id;
+                }
+
+                if (legOrders.length === 0) return;
+
+                // Check order statuses
+                const hasOpen = legOrders.some(o => o.order_status === 'open');
+                const allComplete = legOrders.every(o => o.order_status === 'complete');
+                const allFailed = legOrders.every(o => ['rejected', 'cancelled'].includes(o.order_status));
+
+                if (hasOpen) {
+                    // Has pending orders - freeze partially
+                    console.log(`Leg ${legNumber} has pending orders, freezing with edit allowed`);
+                    freezeLeg(legItem, false, true);
+                } else if (allComplete) {
+                    // All complete - freeze completely
+                    console.log(`Leg ${legNumber} is fully executed`);
+                    freezeLeg(legItem, true, false);
+                } else if (allFailed) {
+                    // All failed - unfreeze
+                    console.log(`Leg ${legNumber} orders failed, keeping unfrozen`);
+                    freezeLeg(legItem, false, false);
+                }
+            });
+        }
+    } catch (error) {
+        console.error('Error checking pending legs:', error);
+    }
+    {% endif %}
 }
 
 // Toggle strike input based on selection
@@ -760,6 +1072,14 @@ function saveStrategy(execute = false) {
                     // Handle different execution statuses
                     if (execData.status === 'success' || execData.status === 'partial') {
                         showNotification(execData.message || 'Orders placed successfully!', 'success');
+
+                        // Reload strategy data and check for pending orders
+                        setTimeout(() => {
+                            loadStrategyData(); // Reload orderbook/tradebook/positions
+                            checkAndFreezePendingLegs(); // Check and freeze pending legs
+                            startStatusPolling(); // Start 5-second polling
+                        }, 1000);
+
                         // Stay on the same page - no redirect
                     } else if (execData.status === 'warning') {
                         // Orders were skipped due to insufficient margin
@@ -833,6 +1153,9 @@ document.addEventListener('DOMContentLoaded', async function() {
         {
             addLeg();
             const legItem = document.querySelectorAll('.leg-item')[{{ loop.index0 }}];
+
+            // Store leg ID for status tracking and cancellation
+            legItem.dataset.legId = '{{ leg.id }}';
 
             // Populate basic fields
             legItem.querySelector('.leg-instrument').value = '{{ leg.instrument }}';
@@ -915,6 +1238,11 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Load strategy execution data if editing existing strategy
     {% if strategy %}
     loadStrategyData();
+    // Check for pending orders and start polling
+    setTimeout(() => {
+        checkAndFreezePendingLegs();
+        startStatusPolling();
+    }, 1000); // Wait 1 second for data to load
     {% endif %}
 });
 
