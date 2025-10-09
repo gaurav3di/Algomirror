@@ -511,6 +511,7 @@ def strategy_orderbook(strategy_id):
             elif order_status == 'pending':
                 order_status = 'open'
 
+        # Add entry order
         orders.append({
             'account_name': execution.account.account_name if execution.account else 'N/A',
             'broker_name': execution.account.broker_name if execution.account else 'N/A',
@@ -526,6 +527,25 @@ def strategy_orderbook(strategy_id):
             'trigger_price': 0.0,
             'timestamp': execution.entry_time.strftime('%d-%b-%Y %H:%M:%S') if execution.entry_time else ""
         })
+
+        # If position was exited, add the exit order as a separate order
+        if execution.status == 'exited' and execution.exit_price:
+            exit_action = 'SELL' if execution.leg.action == 'BUY' else 'BUY'
+            orders.append({
+                'account_name': execution.account.account_name if execution.account else 'N/A',
+                'broker_name': execution.account.broker_name if execution.account else 'N/A',
+                'action': exit_action,
+                'symbol': execution.symbol,
+                'exchange': execution.exchange,
+                'orderid': f"STG_{execution.id}_EXIT",
+                'product': execution.leg.product_type.upper() if execution.leg.product_type else 'MIS',
+                'quantity': str(execution.quantity),
+                'price': execution.exit_price,
+                'pricetype': 'MARKET',
+                'order_status': 'complete',
+                'trigger_price': 0.0,
+                'timestamp': execution.exit_time.strftime('%d-%b-%Y %H:%M:%S') if execution.exit_time else ""
+            })
 
     # Calculate statistics like OpenAlgo
     statistics = {
@@ -561,13 +581,8 @@ def strategy_tradebook(strategy_id):
 
     data = []
     for trade in trades:
-        # Calculate average price and trade value
-        avg_price = trade.entry_price or 0.0
-        if trade.exit_price and trade.status == 'exited':
-            avg_price = (trade.entry_price + trade.exit_price) / 2
-
-        trade_value = avg_price * trade.quantity
-
+        # Add entry trade
+        entry_value = (trade.entry_price or 0.0) * trade.quantity
         data.append({
             'account_name': trade.account.account_name if trade.account else 'N/A',
             'broker_name': trade.account.broker_name if trade.account else 'N/A',
@@ -577,10 +592,28 @@ def strategy_tradebook(strategy_id):
             'orderid': trade.order_id or f"STG_{trade.id}",
             'product': trade.leg.product_type.upper() if trade.leg.product_type else 'MIS',
             'quantity': 0.0,  # OpenAlgo format shows 0.0 for executed trades
-            'average_price': avg_price,
+            'average_price': trade.entry_price or 0.0,
             'timestamp': trade.entry_time.strftime('%H:%M:%S') if trade.entry_time else "",
-            'trade_value': trade_value
+            'trade_value': entry_value
         })
+
+        # If position was exited, add the exit trade as a separate entry
+        if trade.status == 'exited' and trade.exit_price:
+            exit_action = 'SELL' if trade.leg.action == 'BUY' else 'BUY'
+            exit_value = trade.exit_price * trade.quantity
+            data.append({
+                'account_name': trade.account.account_name if trade.account else 'N/A',
+                'broker_name': trade.account.broker_name if trade.account else 'N/A',
+                'action': exit_action,
+                'symbol': trade.symbol,
+                'exchange': trade.exchange,
+                'orderid': f"STG_{trade.id}_EXIT",
+                'product': trade.leg.product_type.upper() if trade.leg.product_type else 'MIS',
+                'quantity': 0.0,  # OpenAlgo format shows 0.0 for executed trades
+                'average_price': trade.exit_price,
+                'timestamp': trade.exit_time.strftime('%H:%M:%S') if trade.exit_time else "",
+                'trade_value': exit_value
+            })
 
     return jsonify({
         'status': 'success',
