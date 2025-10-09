@@ -327,6 +327,9 @@ class StrategyLeg(db.Model):
     trailing_type = db.Column(db.String(20))  # 'percentage', 'points'
     trailing_value = db.Column(db.Float)
 
+    # Execution status
+    is_executed = db.Column(db.Boolean, default=False)  # True if leg has been executed (orders placed)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def __repr__(self):

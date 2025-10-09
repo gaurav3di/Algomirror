@@ -3,6 +3,32 @@
 {% block title %}Strategy Builder - AlgoMirror{% endblock %}
 
 {% block content %}
+<style>
+/* Frozen leg styling */
+.leg-frozen {
+    position: relative;
+}
+.leg-frozen::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(135deg, transparent 48%, rgba(34, 197, 94, 0.1) 48%, rgba(34, 197, 94, 0.1) 52%, transparent 52%);
+    background-size: 20px 20px;
+    pointer-events: none;
+    border-radius: 0.5rem;
+    z-index: 0;
+}
+.leg-frozen > * {
+    position: relative;
+    z-index: 1;
+}
+.cursor-not-allowed {
+    cursor: not-allowed !important;
+}
+</style>
 <div class="container mx-auto px-4 py-6">
     <!-- Header -->
     <div class="flex justify-between items-center mb-6">
@@ -282,10 +308,13 @@
 
 <!-- Leg Template -->
 <template id="legTemplate">
-    <div class="leg-item border rounded-lg p-4 mb-4">
+    <div class="leg-item border rounded-lg p-4 mb-4" data-is-executed="false">
         <div class="flex justify-between items-center mb-3">
-            <h3 class="font-semibold">Leg <span class="leg-number">1</span></h3>
-            <button type="button" onclick="removeLeg(this)" class="btn btn-ghost btn-sm">
+            <h3 class="font-semibold">
+                Leg <span class="leg-number">1</span>
+                <span class="leg-status-badge badge badge-sm badge-success ml-2" style="display:none;">EXECUTED</span>
+            </h3>
+            <button type="button" onclick="removeLeg(this)" class="btn btn-ghost btn-sm leg-remove-btn">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                 </svg>
@@ -459,7 +488,6 @@ async function fetchLotSizes() {
                 'SENSEX': 20,
                 ...data  // Override with database values
             };
-            console.log('Loaded lot sizes from database:', lotSizes);
         } else {
             // Use defaults if fetch fails
             lotSizes = {
@@ -469,7 +497,6 @@ async function fetchLotSizes() {
                 'MIDCPNIFTY': 75,
                 'SENSEX': 20
             };
-            console.log('Using default lot sizes (fetch failed)');
         }
     } catch (error) {
         console.error('Error fetching lot sizes:', error);
@@ -541,6 +568,63 @@ function togglePriceFields(selectElement) {
     }
 }
 
+// Freeze/unfreeze leg (disable/enable all inputs)
+function freezeLeg(legItem, isExecuted) {
+    legItem.dataset.isExecuted = isExecuted ? 'true' : 'false';
+
+    if (isExecuted) {
+        // Show executed badge
+        const badge = legItem.querySelector('.leg-status-badge');
+        if (badge) {
+            badge.style.display = 'inline-block';
+            badge.classList.add('badge-success');
+        }
+
+        // Disable all inputs and selects
+        legItem.querySelectorAll('input, select').forEach(element => {
+            element.disabled = true;
+            element.classList.add('cursor-not-allowed');
+        });
+
+        // Hide remove button
+        const removeBtn = legItem.querySelector('.leg-remove-btn');
+        if (removeBtn) {
+            removeBtn.style.display = 'none';
+        }
+
+        // Add visual indicator (grayed out with green border)
+        legItem.style.opacity = '0.85';
+        legItem.style.backgroundColor = '#f0fdf4';
+        legItem.style.borderColor = '#22c55e';
+        legItem.style.borderWidth = '2px';
+        legItem.classList.add('leg-frozen');
+    } else {
+        // Hide executed badge
+        const badge = legItem.querySelector('.leg-status-badge');
+        if (badge) {
+            badge.style.display = 'none';
+            badge.classList.remove('badge-success');
+        }
+
+        // Enable all inputs and selects
+        legItem.querySelectorAll('input, select').forEach(element => {
+            element.disabled = false;
+            element.classList.remove('cursor-not-allowed');
+        });
+
+        // Show remove button
+        const removeBtn = legItem.querySelector('.leg-remove-btn');
+        if (removeBtn) removeBtn.style.display = 'block';
+
+        // Remove visual indicator
+        legItem.style.opacity = '1';
+        legItem.style.backgroundColor = '';
+        legItem.style.borderColor = '';
+        legItem.style.borderWidth = '';
+        legItem.classList.remove('leg-frozen');
+    }
+}
+
 // Toggle strike input based on selection
 function toggleStrikeInput(select) {
     const legItem = select.closest('.leg-item');
@@ -579,6 +663,11 @@ function toggleStrikeInput(select) {
 function saveStrategy(execute = false) {
     const legs = [];
     document.querySelectorAll('.leg-item').forEach((legItem, index) => {
+        // Skip executed legs - don't send them to server
+        if (legItem.dataset.isExecuted === 'true') {
+            return; // Skip this leg
+        }
+
         const strikeSelect = legItem.querySelector('.leg-strike-selection');
         const selectedOption = strikeSelect?.options[strikeSelect.selectedIndex];
         const strikeValue = legItem.querySelector('.leg-strike-value').value;
@@ -599,7 +688,6 @@ function saveStrategy(execute = false) {
         const instrument = legItem.querySelector('.leg-instrument').value;
         let lotSize = lotSizes[instrument] || 75; // Use fetched lot size or default to 75
         const calculatedQuantity = lots * lotSize;
-        console.log(`Leg ${index + 1}: ${instrument} - lots=${lots}, lotSize=${lotSize}, quantity=${calculatedQuantity}`);
 
         legs.push({
             instrument: instrument,
@@ -667,9 +755,18 @@ function saveStrategy(execute = false) {
                 .then(response => response.json())
                 .then(execData => {
                     // Handle different execution statuses
-                    if (execData.status === 'success') {
-                        showNotification(execData.message || 'Strategy executed successfully', 'success');
-                        setTimeout(() => window.location.href = '/strategy', 2000);
+                    if (execData.status === 'success' || execData.status === 'partial') {
+                        showNotification(execData.message || 'Orders placed successfully! Refreshing...', 'success');
+
+                        // Immediately freeze all non-executed legs visually
+                        document.querySelectorAll('.leg-item').forEach(legItem => {
+                            if (legItem.dataset.isExecuted !== 'true') {
+                                freezeLeg(legItem, true);
+                            }
+                        });
+
+                        // Reload current page after 1.5 seconds to persist frozen state from database
+                        setTimeout(() => window.location.reload(), 1500);
                     } else if (execData.status === 'warning') {
                         // Orders were skipped due to insufficient margin
                         showNotification(execData.message || 'Strategy execution skipped', 'warning');
@@ -677,9 +774,6 @@ function saveStrategy(execute = false) {
                         if (execData.results && execData.results.length > 0) {
                             console.log('Execution details:', execData.results);
                         }
-                    } else if (execData.status === 'partial') {
-                        // Some orders succeeded, some failed/skipped
-                        showNotification(execData.message || 'Strategy partially executed', 'warning');
                     } else {
                         // Error status
                         showNotification(execData.message || 'Strategy execution failed', 'error');
@@ -733,18 +827,10 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Fetch lot sizes from database first
     await fetchLotSizes();
 
-    console.log('Strategy object:', {{ 'true' if strategy else 'false' }});
-    {% if strategy %}
-        console.log('Strategy ID: {{ strategy.id }}');
-    {% endif %}
-    console.log('Strategy legs:', {{ strategy_legs|length if strategy_legs else 0 }});
-
     {% if strategy_legs and strategy_legs|length > 0 %}
-        console.log('Loading {{ strategy_legs|length }} existing legs for strategy');
         // Load existing legs
         {% for leg in strategy_legs %}
         {
-            console.log('Loading leg {{ loop.index }}: {{ leg.instrument }} {{ leg.action }}');
             addLeg();
             const legItem = document.querySelectorAll('.leg-item')[{{ loop.index0 }}];
 
@@ -762,7 +848,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             // Recalculate quantity based on current lot size from database
             const instrument = '{{ leg.instrument }}';
             const lotSize = lotSizes[instrument] || 75;
-            console.log(`Leg {{ loop.index }}: Using lot size ${lotSize} for ${instrument}, lots=${lots}, calculated quantity=${lots * lotSize}`);
 
             legItem.querySelector('.leg-order-type').value = '{{ leg.order_type or "MARKET" }}';
 
@@ -814,6 +899,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             // Toggle option fields if futures
             {% if leg.product_type == 'futures' %}
             toggleOptionFields(legItem.querySelector('.leg-product-type'));
+            {% endif %}
+
+            // Mark as executed and freeze if leg is already executed
+            {% if leg.is_executed %}
+            freezeLeg(legItem, true);
             {% endif %}
         }
         {% endfor %}

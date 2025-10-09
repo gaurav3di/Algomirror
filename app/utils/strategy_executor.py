@@ -34,6 +34,10 @@ class StrategyExecutor:
         self.margin_calculator = None
         self.account_margins = {}  # Track available margin per account
 
+        # Store app reference for thread context
+        from flask import current_app
+        self.app = current_app._get_current_object()
+
         if use_margin_calculator:
             from app.utils.margin_calculator import MarginCalculator
             self.margin_calculator = MarginCalculator(strategy.user_id)
@@ -51,18 +55,19 @@ class StrategyExecutor:
         if not self.accounts:
             raise ValueError("No active accounts selected for strategy")
 
-        # Ensure legs are loaded
-        legs = self.strategy.legs.order_by(StrategyLeg.leg_number).all()
+        # Ensure legs are loaded and filter only non-executed legs
+        all_legs = self.strategy.legs.order_by(StrategyLeg.leg_number).all()
+        legs = [leg for leg in all_legs if not leg.is_executed]
 
         print(f"\n[EXECUTE START] Strategy {self.strategy.id} - {self.strategy.name}")
-        print(f"[EXECUTE] Found {len(legs)} legs:")
+        print(f"[EXECUTE] Total legs: {len(all_legs)}, Unexecuted legs: {len(legs)}")
         for leg in legs:
             print(f"  Leg {leg.leg_number}: {leg.instrument} {leg.action} {leg.option_type} {leg.strike_selection} offset={leg.strike_offset}")
 
         if not legs:
-            raise ValueError("No legs defined for this strategy")
+            raise ValueError("No unexecuted legs found for this strategy")
 
-        logger.info(f"Executing strategy {self.strategy.id} with {len(legs)} legs across {len(self.accounts)} accounts")
+        logger.info(f"Executing strategy {self.strategy.id}: {len(legs)} unexecuted legs across {len(self.accounts)} accounts")
 
         results = []
         for i, leg in enumerate(legs, 1):
@@ -116,6 +121,8 @@ class StrategyExecutor:
 
         # Execute on each account (using threads for parallel execution)
         threads = []
+        logger.info(f"Executing leg {leg.leg_number} on {len(self.accounts)} accounts: {[a.account_name for a in self.accounts]}")
+
         for account in self.accounts:
             # Calculate quantity for this specific account if using margin calculator
             if self.use_margin_calculator:
@@ -133,6 +140,7 @@ class StrategyExecutor:
             else:
                 quantity = base_quantity
 
+            logger.info(f"Starting thread for account {account.account_name}, leg {leg.leg_number}, qty {quantity}")
             thread = threading.Thread(
                 target=self._execute_on_account,
                 args=(account, leg, symbol, exchange, quantity, results)
@@ -140,20 +148,45 @@ class StrategyExecutor:
             thread.start()
             threads.append(thread)
 
+        logger.info(f"Waiting for {len(threads)} threads to complete for leg {leg.leg_number}")
+
         # Wait for all threads to complete
         for thread in threads:
             thread.join()
+
+        logger.info(f"All threads completed for leg {leg.leg_number}. Total results: {len(results)}")
+
+        # Mark leg as executed in the main session after all accounts complete
+        # Check if at least one order succeeded
+        successful_orders = [r for r in results if r.get('status') == 'success']
+        failed_orders = [r for r in results if r.get('status') in ['failed', 'error']]
+        skipped_orders = [r for r in results if r.get('status') == 'skipped']
+
+        logger.info(f"Leg {leg.leg_number} execution summary: {len(successful_orders)} success, {len(failed_orders)} failed, {len(skipped_orders)} skipped")
+
+        # Log details of any failures
+        for failed in failed_orders:
+            logger.error(f"Failed order on {failed.get('account', 'unknown')}: {failed.get('error', 'unknown error')}")
+
+        if successful_orders:
+            try:
+                # Mark leg as executed in current session
+                leg.is_executed = True
+                db.session.commit()
+                logger.debug(f"Leg {leg.leg_number} marked as executed (main session)")
+            except Exception as e:
+                logger.error(f"Failed to mark leg as executed: {e}")
+                db.session.rollback()
 
         return results
 
     def _execute_on_account(self, account: TradingAccount, leg: StrategyLeg,
                            symbol: str, exchange: str, quantity: int, results: List):
         """Execute order on a specific account"""
-        from app import create_app
+        account_name = account.account_name
+        logger.info(f"[THREAD START] Executing leg {leg.leg_number} on account {account_name}: {symbol} {leg.action} qty={quantity}")
 
         try:
-            logger.info(f"Executing leg {leg.leg_number} on account {account.account_name}: "
-                       f"{symbol} {leg.action} qty={quantity}")
 
             # Get API key before entering thread context
             api_key = account.get_api_key()
@@ -233,9 +266,8 @@ class StrategyExecutor:
                 # Fetch actual order status
                 order_status_data = self._get_order_status(client, order_id, self.strategy.name)
 
-                # Create execution record within app context
-                app = create_app()
-                with app.app_context():
+                # Create execution record with app context for thread safety
+                with self.app.app_context():
                     execution = StrategyExecution(
                         strategy_id=self.strategy.id,
                         account_id=account_id,
@@ -252,7 +284,27 @@ class StrategyExecutor:
 
                     with self.lock:
                         db.session.add(execution)
-                        db.session.commit()
+
+                        # Note: leg.is_executed is set in main session after all threads complete
+                        # This avoids session conflicts between threads
+
+                        # Retry commit with exponential backoff for SQLite locks
+                        max_retries = 5
+                        for attempt in range(max_retries):
+                            try:
+                                db.session.commit()
+                                break
+                            except Exception as commit_error:
+                                if attempt < max_retries - 1:
+                                    import time as time_sleep
+                                    db.session.rollback()
+                                    wait_time = 0.1 * (2 ** attempt)  # Exponential backoff: 0.1, 0.2, 0.4, 0.8, 1.6 seconds
+                                    logger.debug(f"DB locked, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                                    time_sleep.sleep(wait_time)
+                                else:
+                                    logger.error(f"Failed to commit after {max_retries} attempts: {commit_error}")
+                                    db.session.rollback()
+                                    raise
 
                         results.append({
                             'account': account_name,
@@ -267,18 +319,22 @@ class StrategyExecutor:
                     # Start monitoring for exits with WebSocket and background thread
                     self._start_exit_monitoring(execution)
 
+                logger.info(f"[THREAD SUCCESS] Leg {leg.leg_number} executed successfully on {account_name}, order_id: {order_id}")
+
             else:
+                error_msg = response.get('message', 'Order placement failed')
+                logger.error(f"[THREAD FAILED] Leg {leg.leg_number} failed on {account_name}: {error_msg}")
                 with self.lock:
                     results.append({
                         'account': account_name,
                         'symbol': symbol,
                         'status': 'failed',
-                        'error': response.get('message', 'Order placement failed'),
+                        'error': error_msg,
                         'leg': leg.leg_number
                     })
 
         except Exception as e:
-            logger.error(f"Error executing leg {leg.leg_number} on account: {e}")
+            logger.error(f"[THREAD ERROR] Error executing leg {leg.leg_number} on account {account_name}: {e}", exc_info=True)
             with self.lock:
                 results.append({
                     'account': account_name if 'account_name' in locals() else 'unknown',
@@ -287,6 +343,8 @@ class StrategyExecutor:
                     'error': str(e),
                     'leg': leg.leg_number
                 })
+
+        logger.info(f"[THREAD END] Completed execution for leg {leg.leg_number} on account {account_name}")
 
     def _get_order_status(self, client: ExtendedOpenAlgoAPI, order_id: str, strategy_name: str) -> Dict:
         """Fetch order status from broker using OpenAlgo API"""
@@ -922,7 +980,7 @@ class StrategyExecutor:
                         db.session.commit()
                         logger.info(f"[MONITOR] Fetched entry price: {execution.entry_price} for {symbol}")
 
-                logger.info(f"[MONITOR_LOOP] Entry price={execution.entry_price}, Status={execution.status}")
+                logger.debug(f"[MONITOR_LOOP] Entry price={execution.entry_price}, Status={execution.status}")
 
                 while execution.status == 'entered':
                     logger.debug(f"[MONITOR_TICK] Monitoring tick for {symbol}")
@@ -955,7 +1013,7 @@ class StrategyExecutor:
                             # Use WebSocket data
                             ltp = price_info['ltp']
                             price_data = price_info
-                            logger.info(f"[MONITOR_WS] Using WebSocket price for {symbol}: {ltp}")
+                            logger.debug(f"[MONITOR_WS] Using WebSocket price for {symbol}: {ltp}")
                     else:
                         logger.debug(f"[MONITOR_WS] No WebSocket data for {symbol}, falling back to REST")
 
@@ -990,11 +1048,18 @@ class StrategyExecutor:
                             pnl = (execution.entry_price - ltp) * execution.quantity
 
                         execution.unrealized_pnl = pnl
-                        db.session.commit()
 
-                        # Log P&L periodically for monitoring
+                        # Commit with retry logic for SQLite database lock
+                        try:
+                            db.session.commit()
+                        except Exception as commit_error:
+                            logger.debug(f"DB commit error (will retry): {commit_error}")
+                            db.session.rollback()
+                            # Don't fail - P&L will update on next tick
+
+                        # Log P&L periodically for monitoring (DEBUG level to avoid spam)
                         if int(time_module.time()) % 30 == 0:  # Every 30 seconds
-                            logger.info(f"Position {symbol}: Entry={execution.entry_price}, LTP={ltp}, P&L={pnl:.2f}")
+                            logger.debug(f"Position {symbol}: Entry={execution.entry_price}, LTP={ltp}, P&L={pnl:.2f}")
 
                         # Check exit conditions with live price
                         if self._should_exit(execution, ltp, pnl):

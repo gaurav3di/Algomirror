@@ -25,14 +25,50 @@ limiter = None
 
 def setup_logging(app):
     """Set up centralized logging with JSON format"""
+
     if not os.path.exists('logs'):
         os.mkdir('logs')
-    
+
+    # CRITICAL: Disable all propagation to root and set levels FIRST
+    # This must happen before any handlers are added
+    noisy_loggers = [
+        'app.utils.websocket_manager',
+        'app.utils.background_service',
+        'app.utils.option_chain',
+        'app.trading.routes',
+        'werkzeug'
+    ]
+
+    # Set logging levels for noisy modules - do this ALWAYS, not just first time
+    for logger_name in noisy_loggers:
+        noisy_logger = logging.getLogger(logger_name)
+        noisy_logger.setLevel(logging.WARNING)  # Block DEBUG and INFO
+        noisy_logger.propagate = False  # CRITICAL: Don't propagate to root
+        noisy_logger.handlers = []  # Clear any existing handlers
+
+    # Clear all root and app handlers first
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.INFO)
+
+    # Check if we already set up our custom handler
+    from logging.handlers import RotatingFileHandler as RFH
+    custom_handler_exists = any(
+        isinstance(h, (logging.FileHandler, RFH))
+        for h in app.logger.handlers
+    )
+    if custom_handler_exists:
+        return
+
+    # Clear Flask's default handlers
+    app.logger.handlers.clear()
+    app.logger.propagate = False
+
     # JSON formatter for structured logging
     # Use simple FileHandler on Windows to avoid rotation issues
     import platform
     is_windows = platform.system() == 'Windows'
-    
+
     if is_windows:
         # On Windows, use simple FileHandler to avoid rotation conflicts
         from logging import FileHandler
@@ -40,8 +76,8 @@ def setup_logging(app):
     else:
         # On Unix systems, use RotatingFileHandler
         logHandler = RotatingFileHandler(
-            'logs/algomirror.log', 
-            maxBytes=10485760, 
+            'logs/algomirror.log',
+            maxBytes=10485760,
             backupCount=10
         )
     formatter = jsonlogger.JsonFormatter(
@@ -49,22 +85,27 @@ def setup_logging(app):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     logHandler.setFormatter(formatter)
-    
+
+    # Create a filter to suppress noisy loggers at DEBUG/INFO level
+    class NoisyLoggerFilter(logging.Filter):
+        def filter(self, record):
+            # Block DEBUG and INFO from noisy modules
+            if record.name in noisy_loggers and record.levelno < logging.WARNING:
+                return False
+            return True
+
+    logHandler.addFilter(NoisyLoggerFilter())
+
     # Set log level from config
     log_level = getattr(logging, app.config['LOG_LEVEL'].upper(), logging.INFO)
     logHandler.setLevel(log_level)
-    
+
     # Add handler to app logger
     app.logger.addHandler(logHandler)
     app.logger.setLevel(log_level)
+
     app.logger.info('AlgoMirror startup', extra={'event': 'startup'})
 
-    # Suppress noisy loggers
-    logging.getLogger('app.utils.websocket_manager').setLevel(logging.CRITICAL)
-    logging.getLogger('app.utils.background_service').setLevel(logging.CRITICAL)
-    logging.getLogger('app.utils.option_chain').setLevel(logging.CRITICAL)
-    logging.getLogger('app.trading.routes').setLevel(logging.CRITICAL)
-    
     # Also log to console in development
     if app.debug:
         console_handler = logging.StreamHandler()

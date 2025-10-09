@@ -8,6 +8,15 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///algomirror.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # SQLite-specific settings for handling locks
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'connect_args': {
+            'timeout': 30  # Wait up to 30 seconds for locks to clear
+        },
+        'pool_pre_ping': True,  # Verify connections before using
+        'pool_recycle': 3600,   # Recycle connections every hour
+    }
     
     # Session configuration
     SESSION_TYPE = os.environ.get('SESSION_TYPE') or 'filesystem'

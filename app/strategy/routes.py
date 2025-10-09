@@ -93,7 +93,7 @@ def builder(strategy_id=None):
 
         # Log details for debugging
         for leg in strategy.legs_list:
-            logger.debug(f"Leg {leg.leg_number}: {leg.instrument} {leg.action} {leg.option_type}")
+            logger.info(f"Leg {leg.leg_number}: {leg.instrument} {leg.action} is_executed={leg.is_executed}")
 
     # Get user's accounts
     accounts = TradingAccount.query.filter_by(
@@ -137,19 +137,39 @@ def builder(strategy_id=None):
             # Save strategy first to get ID
             db.session.flush()
 
-            # Delete existing legs if updating
+            # When updating, only delete non-executed legs (preserve executed ones)
             if strategy_id:
-                StrategyLeg.query.filter_by(strategy_id=strategy.id).delete()
+                # Get existing executed legs to preserve them
+                existing_executed_legs = StrategyLeg.query.filter_by(
+                    strategy_id=strategy.id,
+                    is_executed=True
+                ).all()
 
-            # Add strategy legs
+                # Delete only non-executed legs
+                StrategyLeg.query.filter_by(
+                    strategy_id=strategy.id,
+                    is_executed=False
+                ).delete()
+
+                logger.info(f"Preserved {len(existing_executed_legs)} executed legs, deleted non-executed legs")
+
+            # Calculate starting leg number (after existing executed legs)
+            existing_leg_count = StrategyLeg.query.filter_by(
+                strategy_id=strategy.id,
+                is_executed=True
+            ).count() if strategy_id else 0
+
+            # Add NEW strategy legs (only the ones from the form)
             for i, leg_data in enumerate(data.get('legs', [])):
+                leg_number = existing_leg_count + i + 1  # Start after executed legs
+
                 # Log the received data for debugging
-                logger.info(f"Saving leg {i+1}: instrument={leg_data.get('instrument')}, "
+                logger.info(f"Saving leg {leg_number}: instrument={leg_data.get('instrument')}, "
                            f"lots={leg_data.get('lots')}, quantity={leg_data.get('quantity')}")
 
                 leg = StrategyLeg(
                     strategy_id=strategy.id,
-                    leg_number=i + 1,
+                    leg_number=leg_number,
                     instrument=leg_data.get('instrument'),
                     product_type=leg_data.get('product_type'),
                     expiry=leg_data.get('expiry'),
@@ -223,6 +243,15 @@ def execute_strategy(strategy_id):
                 'message': 'Strategy has no legs defined'
             }), 400
 
+        # Filter only non-executed legs
+        unexecuted_legs = [leg for leg in strategy.legs if not leg.is_executed]
+
+        if len(unexecuted_legs) == 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'All legs have already been executed. Please add new legs to execute.'
+            }), 400
+
         # Check if accounts are selected
         if not strategy.selected_accounts:
             return jsonify({
@@ -230,10 +259,10 @@ def execute_strategy(strategy_id):
                 'message': 'No accounts selected for strategy'
             }), 400
 
-        logger.info(f"Executing strategy {strategy_id} ({strategy.name}) with {leg_count} legs")
+        logger.info(f"Executing strategy {strategy_id} ({strategy.name}): {len(unexecuted_legs)} unexecuted legs out of {leg_count} total")
 
-        # Check if any leg has explicit quantity set
-        has_explicit_quantities = any(leg.quantity and leg.quantity > 0 for leg in strategy.legs)
+        # Check if any leg has explicit quantity set (only check unexecuted legs)
+        has_explicit_quantities = any(leg.quantity and leg.quantity > 0 for leg in unexecuted_legs)
 
         # If explicit quantities are set, disable margin calculator
         use_margin_calc = not has_explicit_quantities
@@ -677,8 +706,12 @@ def strategy_positions(strategy_id):
             'pnl': str(round(pnl, 2))
         })
 
-    # Save unrealized P&L to database
-    db.session.commit()
+    # Save unrealized P&L to database with error handling for database locks
+    try:
+        db.session.commit()
+    except Exception as e:
+        logger.debug(f"DB commit error in positions (will continue): {e}")
+        db.session.rollback()
 
     return jsonify({
         'status': 'success',
@@ -713,6 +746,8 @@ def close_all_positions(strategy_id):
         results = []
         for position in open_positions:
             try:
+                logger.info(f"Attempting to close position: {position.symbol} on account {position.account.account_name}, leg {position.leg.leg_number}")
+
                 # Reverse the position
                 client = ExtendedOpenAlgoAPI(
                     api_key=position.account.get_api_key(),
@@ -721,6 +756,8 @@ def close_all_positions(strategy_id):
 
                 # Reverse action for closing
                 close_action = 'SELL' if position.leg.action == 'BUY' else 'BUY'
+
+                logger.info(f"Placing close order: {close_action} {position.quantity} {position.symbol} on {position.exchange}")
 
                 response = client.placeorder(
                     strategy=f"Close_{strategy.name}",
@@ -732,15 +769,25 @@ def close_all_positions(strategy_id):
                     product=strategy.product_order_type or 'MIS'
                 )
 
+                logger.info(f"Close order response for {position.symbol}: {response}")
+
                 if response.get('status') == 'success':
                     # Update position status
                     position.status = 'exited'
                     position.exit_time = datetime.utcnow()
                     position.exit_reason = 'manual_close'
 
+                    # Mark leg as executed (since order was placed)
+                    if position.leg and not position.leg.is_executed:
+                        position.leg.is_executed = True
+
                     # Get exit price
-                    quote = client.quotes(symbol=position.symbol, exchange=position.exchange)
-                    position.exit_price = float(quote.get('data', {}).get('ltp', 0))
+                    try:
+                        quote = client.quotes(symbol=position.symbol, exchange=position.exchange)
+                        position.exit_price = float(quote.get('data', {}).get('ltp', 0))
+                    except Exception as quote_error:
+                        logger.warning(f"Failed to fetch exit price for {position.symbol}: {quote_error}")
+                        position.exit_price = position.entry_price  # Fallback to entry price
 
                     # Calculate realized P&L
                     if position.leg.action == 'BUY':
@@ -748,21 +795,29 @@ def close_all_positions(strategy_id):
                     else:
                         position.realized_pnl = (position.entry_price - position.exit_price) * position.quantity
 
+                    logger.info(f"Successfully closed {position.symbol}, P&L: {position.realized_pnl}")
+
                     results.append({
                         'symbol': position.symbol,
+                        'account': position.account.account_name,
                         'status': 'success',
                         'pnl': position.realized_pnl
                     })
                 else:
+                    error_msg = response.get('message', 'Unknown error')
+                    logger.error(f"Failed to close {position.symbol}: {error_msg}")
                     results.append({
                         'symbol': position.symbol,
+                        'account': position.account.account_name,
                         'status': 'failed',
-                        'error': response.get('message')
+                        'error': error_msg
                     })
 
             except Exception as e:
+                logger.error(f"Exception closing position {position.symbol}: {str(e)}", exc_info=True)
                 results.append({
                     'symbol': position.symbol,
+                    'account': getattr(position.account, 'account_name', 'unknown'),
                     'status': 'error',
                     'error': str(e)
                 })
