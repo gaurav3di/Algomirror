@@ -582,8 +582,9 @@ def modify_leg_orders(strategy_id, leg_id):
                 )
 
                 if response.get('status') == 'success':
-                    # Update execution with new price
-                    execution.entry_price = new_price
+                    # DO NOT set entry_price here - it should only be set when order is FILLED
+                    # entry_price is the execution price, not the limit price
+                    # Order is still pending after modification
                     modified_count += 1
                     logger.info(f"Modified order {execution.order_id} for leg {leg_id} to price {new_price}")
                 else:
@@ -807,14 +808,12 @@ def strategy_orderbook(strategy_id):
     orders = []
     for execution in executions:
         # Determine order status for display
-        # If order has entry_price, it's definitely filled (override broker status)
-        if execution.entry_price and execution.entry_price > 0:
-            order_status = 'complete'
-        # Otherwise use actual broker order status if available
-        elif hasattr(execution, 'broker_order_status') and execution.broker_order_status:
+        # IMPORTANT: Check broker_order_status FIRST (most reliable)
+        # DO NOT use entry_price to determine status - it can be set to limit price
+        if hasattr(execution, 'broker_order_status') and execution.broker_order_status:
             order_status = execution.broker_order_status
-        else:
-            # Fallback to mapping from execution status
+        # Fallback to mapping from execution status
+        elif execution.status:
             order_status = execution.status
             if order_status == 'entered':
                 order_status = 'complete'
@@ -824,6 +823,9 @@ def strategy_orderbook(strategy_id):
                 order_status = 'rejected'
             elif order_status == 'pending':
                 order_status = 'open'
+        else:
+            # Last resort - unknown status
+            order_status = 'open'
 
         # Add entry order
         orders.append({
