@@ -214,40 +214,10 @@ class StrategyExecutor:
                 order_params['price_type'] = 'MARKET'
 
             elif leg.order_type == 'LIMIT':
-                # For LIMIT orders with ABOVE/BELOW condition, determine actual order type
-                if leg.price_condition == 'ABOVE':
-                    # If price crosses ABOVE, use SL-MKT for BUY, LIMIT for SELL
-                    if leg.action == 'BUY':
-                        order_params['price_type'] = 'SL-MKT'
-                        order_params['trigger_price'] = leg.trigger_price if leg.trigger_price else leg.limit_price
-                    else:  # SELL
-                        order_params['price_type'] = 'LIMIT'
-                        order_params['price'] = leg.limit_price
-                elif leg.price_condition == 'BELOW':
-                    # If price crosses BELOW, use LIMIT for BUY, SL-MKT for SELL
-                    if leg.action == 'BUY':
-                        order_params['price_type'] = 'LIMIT'
-                        order_params['price'] = leg.limit_price
-                    else:  # SELL
-                        order_params['price_type'] = 'SL-MKT'
-                        order_params['trigger_price'] = leg.trigger_price if leg.trigger_price else leg.limit_price
-                else:
-                    # Default LIMIT order without condition
-                    order_params['price_type'] = 'LIMIT'
-                    if leg.limit_price:
-                        order_params['price'] = leg.limit_price
-
-            elif leg.order_type == 'SL-MKT':
-                order_params['price_type'] = 'SL-MKT'
-                if leg.trigger_price:
-                    order_params['trigger_price'] = leg.trigger_price
-
-            elif leg.order_type == 'SL-LMT':
-                order_params['price_type'] = 'SL-LMT'
+                # Simple LIMIT order
+                order_params['price_type'] = 'LIMIT'
                 if leg.limit_price:
                     order_params['price'] = leg.limit_price
-                if leg.trigger_price:
-                    order_params['trigger_price'] = leg.trigger_price
 
             print(f"[ORDER PARAMS] Placing order for {account_name}: {order_params}")
             logger.debug(f"Order params: {order_params}")

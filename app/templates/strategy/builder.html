@@ -432,20 +432,12 @@
                 <input type="number" class="input input-bordered input-sm leg-lots" value="1" min="1">
             </div>
 
-            <!-- Row 3: Order Type, Price Condition, Limit Price, Trigger Price -->
+            <!-- Row 3: Order Type, Limit Price -->
             <div class="form-control">
                 <label class="label"><span class="label-text text-xs">9. Order Type</span></label>
                 <select class="select select-bordered select-sm leg-order-type" onchange="togglePriceFields(this)">
                     <option value="MARKET">MARKET</option>
                     <option value="LIMIT">LIMIT</option>
-                </select>
-            </div>
-
-            <div class="form-control price-condition-field" style="display:none;">
-                <label class="label"><span class="label-text text-xs">Price Condition</span></label>
-                <select class="select select-bordered select-sm leg-price-condition">
-                    <option value="ABOVE">ABOVE</option>
-                    <option value="BELOW">BELOW</option>
                 </select>
             </div>
 
@@ -570,16 +562,13 @@ function toggleOptionFields(select) {
 function togglePriceFields(selectElement) {
     const legItem = selectElement.closest('.leg-item');
     const orderType = selectElement.value;
-    const priceConditionField = legItem.querySelector('.price-condition-field');
     const limitPriceField = legItem.querySelector('.limit-price-field');
 
-    // Hide all by default
-    if (priceConditionField) priceConditionField.style.display = 'none';
+    // Hide by default
     if (limitPriceField) limitPriceField.style.display = 'none';
 
-    // Show relevant fields based on order type
+    // Show limit price field only for LIMIT orders
     if (orderType === 'LIMIT') {
-        if (priceConditionField) priceConditionField.style.display = 'block';
         if (limitPriceField) limitPriceField.style.display = 'block';
     }
 }
@@ -695,7 +684,6 @@ function saveStrategy(execute = false) {
         }
 
         const orderType = legItem.querySelector('.leg-order-type').value;
-        const priceCondition = legItem.querySelector('.leg-price-condition')?.value;
         const limitPrice = legItem.querySelector('.leg-limit-price')?.value;
         const lots = parseInt(legItem.querySelector('.leg-lots').value) || 1;
 
@@ -718,7 +706,6 @@ function saveStrategy(execute = false) {
             lots: lots,
             quantity: calculatedQuantity,  // Use calculated quantity
             order_type: orderType,
-            price_condition: orderType === 'LIMIT' ? priceCondition : null,
             limit_price: limitPrice ? parseFloat(limitPrice) : null,
             trigger_price: null,
             stop_loss_type: 'percentage',
