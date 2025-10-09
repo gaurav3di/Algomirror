@@ -266,6 +266,16 @@ class StrategyExecutor:
                 # Fetch actual order status
                 order_status_data = self._get_order_status(client, order_id, self.strategy.name)
 
+                # Determine execution status based on broker order status
+                broker_order_status = order_status_data.get('order_status', 'pending') if order_status_data else 'pending'
+
+                # If broker rejected/cancelled the order, mark execution as failed
+                if broker_order_status in ['rejected', 'cancelled']:
+                    execution_status = 'failed'
+                    logger.warning(f"Order {order_id} was {broker_order_status} by broker for {symbol} on {account_name}")
+                else:
+                    execution_status = 'entered'
+
                 # Create execution record with app context for thread safety
                 with self.app.app_context():
                     execution = StrategyExecution(
@@ -276,8 +286,8 @@ class StrategyExecutor:
                         symbol=symbol,
                         exchange=exchange,
                         quantity=quantity,
-                        status='entered',
-                        broker_order_status=order_status_data.get('order_status', 'pending') if order_status_data else 'pending',
+                        status=execution_status,
+                        broker_order_status=broker_order_status,
                         entry_time=datetime.utcnow(),
                         entry_price=order_status_data.get('average_price') if order_status_data else None
                     )
@@ -306,20 +316,36 @@ class StrategyExecutor:
                                     db.session.rollback()
                                     raise
 
-                        results.append({
-                            'account': account_name,
-                            'symbol': symbol,
-                            'order_id': order_id,
-                            'status': 'success',
-                            'order_status': order_status_data.get('order_status', 'pending') if order_status_data else 'pending',
-                            'executed_price': order_status_data.get('average_price', 0) if order_status_data else 0,
-                            'leg': leg.leg_number
-                        })
+                        # Report status based on whether broker accepted or rejected
+                        if execution_status == 'failed':
+                            results.append({
+                                'account': account_name,
+                                'symbol': symbol,
+                                'order_id': order_id,
+                                'status': 'failed',
+                                'error': f"Order {broker_order_status} by broker",
+                                'order_status': broker_order_status,
+                                'leg': leg.leg_number
+                            })
+                        else:
+                            results.append({
+                                'account': account_name,
+                                'symbol': symbol,
+                                'order_id': order_id,
+                                'status': 'success',
+                                'order_status': broker_order_status,
+                                'executed_price': order_status_data.get('average_price', 0) if order_status_data else 0,
+                                'leg': leg.leg_number
+                            })
 
-                    # Start monitoring for exits with WebSocket and background thread
-                    self._start_exit_monitoring(execution)
+                            # Start monitoring for exits only for successfully entered positions
+                            self._start_exit_monitoring(execution)
 
-                logger.info(f"[THREAD SUCCESS] Leg {leg.leg_number} executed successfully on {account_name}, order_id: {order_id}")
+                # Log appropriate message based on execution status
+                if execution_status == 'failed':
+                    logger.warning(f"[THREAD REJECTED] Leg {leg.leg_number} was {broker_order_status} by broker on {account_name}, order_id: {order_id}")
+                else:
+                    logger.info(f"[THREAD SUCCESS] Leg {leg.leg_number} executed successfully on {account_name}, order_id: {order_id}")
 
             else:
                 error_msg = response.get('message', 'Order placement failed')

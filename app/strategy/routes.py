@@ -31,7 +31,13 @@ def dashboard():
         StrategyExecution.created_at >= today_start
     ).all()
 
-    today_pnl = sum(e.realized_pnl or 0 for e in today_executions if e.realized_pnl)
+    # Calculate P&L only from successful executions (exclude rejected/failed)
+    today_pnl = sum(
+        e.realized_pnl or 0
+        for e in today_executions
+        if e.realized_pnl and e.status != 'failed'
+        and not (hasattr(e, 'broker_order_status') and e.broker_order_status in ['rejected', 'cancelled'])
+    )
 
     # Get active strategy count
     active_strategies = [s for s in strategies if s.is_active]
@@ -337,11 +343,17 @@ def exit_strategy(strategy_id):
             user_id=current_user.id
         ).first_or_404()
 
-        # Get active executions
+        # Get active executions (exclude rejected/cancelled)
         active_executions = StrategyExecution.query.filter_by(
             strategy_id=strategy_id,
             status='entered'
         ).all()
+
+        # Filter out rejected/cancelled orders
+        active_executions = [
+            exec for exec in active_executions
+            if not (hasattr(exec, 'broker_order_status') and exec.broker_order_status in ['rejected', 'cancelled'])
+        ]
 
         if not active_executions:
             return jsonify({
@@ -380,11 +392,17 @@ def delete_strategy(strategy_id):
         # Check if force deletion is requested
         force_delete = request.args.get('force', 'false').lower() == 'true'
 
-        # Check for active positions
+        # Check for active positions (exclude rejected/cancelled)
         active_executions = StrategyExecution.query.filter_by(
             strategy_id=strategy_id,
             status='entered'
         ).all()
+
+        # Filter out rejected/cancelled orders
+        active_executions = [
+            exec for exec in active_executions
+            if not (hasattr(exec, 'broker_order_status') and exec.broker_order_status in ['rejected', 'cancelled'])
+        ]
 
         # Get all executions (for cleanup on force delete)
         all_executions = StrategyExecution.query.filter_by(
@@ -471,6 +489,12 @@ def cleanup_expired_executions():
             StrategyExecution.status == 'entered'  # Still marked as open
         ).all()
 
+        # Filter out rejected/cancelled orders
+        old_executions = [
+            exec for exec in old_executions
+            if not (hasattr(exec, 'broker_order_status') and exec.broker_order_status in ['rejected', 'cancelled'])
+        ]
+
         if not old_executions:
             return jsonify({
                 'status': 'info',
@@ -519,7 +543,7 @@ def strategy_orderbook(strategy_id):
         user_id=current_user.id
     ).first_or_404()
 
-    # Get all executions for this strategy
+    # Get all executions for this strategy (INCLUDE rejected/failed for visibility)
     executions = StrategyExecution.query.filter_by(
         strategy_id=strategy_id
     ).join(TradingAccount).join(StrategyLeg).all()
@@ -603,11 +627,20 @@ def strategy_tradebook(strategy_id):
         user_id=current_user.id
     ).first_or_404()
 
-    # Get executed trades
+    # Get executed trades (exclude rejected/cancelled/failed)
     trades = StrategyExecution.query.filter(
         StrategyExecution.strategy_id == strategy_id,
         StrategyExecution.status.in_(['entered', 'exited'])
     ).join(TradingAccount).join(StrategyLeg).all()
+
+    # Filter to show only successfully executed trades
+    # Exclude: failed status, or any problematic broker status
+    trades = [
+        trade for trade in trades
+        if trade.status != 'failed'
+        and not (hasattr(trade, 'broker_order_status') and
+                 trade.broker_order_status in ['rejected', 'cancelled', 'pending', 'open'])
+    ]
 
     data = []
     for trade in trades:
@@ -659,7 +692,7 @@ def strategy_positions(strategy_id):
         user_id=current_user.id
     ).first_or_404()
 
-    # Get open positions
+    # Get open positions (only status='entered', exclude rejected/cancelled/failed)
     positions = StrategyExecution.query.filter_by(
         strategy_id=strategy_id,
         status='entered'
@@ -669,6 +702,12 @@ def strategy_positions(strategy_id):
 
     data = []
     for position in positions:
+        # Skip orders that were failed or have problematic broker status
+        if position.status == 'failed':
+            continue
+        # Skip if broker status indicates order is not successfully filled
+        if hasattr(position, 'broker_order_status') and position.broker_order_status in ['rejected', 'cancelled', 'pending', 'open']:
+            continue
         # Get current price for P&L calculation
         try:
             client = ExtendedOpenAlgoAPI(
@@ -729,11 +768,17 @@ def close_all_positions(strategy_id):
             user_id=current_user.id
         ).first_or_404()
 
-        # Get all open positions
+        # Get all open positions (exclude rejected/cancelled)
         open_positions = StrategyExecution.query.filter_by(
             strategy_id=strategy_id,
             status='entered'
         ).all()
+
+        # Filter out rejected/cancelled orders
+        open_positions = [
+            pos for pos in open_positions
+            if not (hasattr(pos, 'broker_order_status') and pos.broker_order_status in ['rejected', 'cancelled'])
+        ]
 
         if not open_positions:
             return jsonify({
@@ -957,6 +1002,12 @@ def get_positions(strategy_id):
             strategy_id=strategy_id,
             status='entered'
         ).all()
+
+        # Filter out rejected/cancelled orders
+        executions = [
+            exec for exec in executions
+            if not (hasattr(exec, 'broker_order_status') and exec.broker_order_status in ['rejected', 'cancelled'])
+        ]
 
         positions = []
         for execution in executions:
