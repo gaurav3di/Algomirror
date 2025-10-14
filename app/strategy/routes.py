@@ -466,7 +466,7 @@ def cancel_leg_orders(strategy_id, leg_id):
                 # Cancel the order using OpenAlgo API
                 response = client.cancelorder(
                     order_id=execution.order_id,
-                    strategy=strategy.name
+                    strategy=f"Strategy_{strategy.id}"
                 )
 
                 if response.get('status') == 'success':
@@ -598,7 +598,7 @@ def modify_leg_orders(strategy_id, leg_id):
                 # Use execution fields (actual placed order details) not leg fields
                 response = client.modifyorder(
                     order_id=execution.order_id,
-                    strategy=strategy.name,
+                    strategy=f"Strategy_{strategy.id}",
                     symbol=execution.symbol,
                     action=leg.action,
                     exchange=execution.exchange,
@@ -1148,7 +1148,7 @@ def close_all_positions(strategy_id):
                     for attempt in range(max_retries):
                         try:
                             response = client.placeorder(
-                                strategy=f"Close_{strategy_name}",
+                                strategy=strategy_name,
                                 symbol=position.symbol,
                                 exchange=position.exchange,
                                 action=close_action,

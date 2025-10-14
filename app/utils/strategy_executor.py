@@ -262,7 +262,7 @@ class StrategyExecutor:
 
                 # Prepare order parameters based on order type and price condition
                 order_params = {
-                    'strategy': f"Strategy_{self.strategy.id}",
+                    'strategy': self.strategy.name,
                     'symbol': symbol,
                     'action': leg.action,
                     'exchange': exchange,
@@ -365,7 +365,7 @@ class StrategyExecutor:
                             execution_id=execution.id,
                             account=account,
                             order_id=order_id,
-                            strategy_name=f"Strategy_{self.strategy.id}"
+                            strategy_name=self.strategy.name
                         )
 
                         # Report as pending - background poller will update status
@@ -1065,7 +1065,7 @@ class StrategyExecutor:
                     # Get order details to fetch entry price
                     order_response = client.orderstatus(
                         order_id=execution.order_id,
-                        strategy=f"Strategy_{self.strategy.id}"
+                        strategy=self.strategy.name
                     )
                     if order_response.get('status') == 'success':
                         execution.entry_price = order_response.get('data', {}).get('average_price')
@@ -1261,7 +1261,7 @@ class StrategyExecutor:
             exit_action = 'SELL' if execution.leg.action == 'BUY' else 'BUY'
 
             response = client.placeorder(
-                strategy=f"Strategy_{self.strategy.id}",
+                strategy=self.strategy.name,
                 symbol=execution.symbol,
                 action=exit_action,
                 exchange=execution.exchange,
@@ -1283,7 +1283,7 @@ class StrategyExecutor:
                 # Fetch exit order details to get executed price
                 order_status_response = client.orderstatus(
                     order_id=exit_order_id,
-                    strategy=f"Strategy_{self.strategy.id}"
+                    strategy=self.strategy.name
                 )
 
                 if order_status_response.get('status') == 'success':
