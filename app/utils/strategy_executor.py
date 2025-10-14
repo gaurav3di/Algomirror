@@ -168,6 +168,7 @@ class StrategyExecutor:
         threads = []
         logger.info(f"Executing leg {leg.leg_number} on {len(self.accounts)} accounts: {[a.account_name for a in self.accounts]}")
 
+        thread_index = 0
         for account in self.accounts:
             # Calculate quantity for this specific account if using margin calculator
             if self.use_margin_calculator:
@@ -188,10 +189,11 @@ class StrategyExecutor:
             logger.info(f"Starting thread for account {account.account_name}, leg {leg.leg_number}, qty {quantity}")
             thread = threading.Thread(
                 target=self._execute_on_account,
-                args=(account, leg, symbol, exchange, quantity, results)
+                args=(account, leg, symbol, exchange, quantity, results, thread_index)
             )
             thread.start()
             threads.append(thread)
+            thread_index += 1
 
         logger.info(f"Waiting for {len(threads)} threads to complete for leg {leg.leg_number}")
 
@@ -226,8 +228,18 @@ class StrategyExecutor:
         return results
 
     def _execute_on_account(self, account: TradingAccount, leg: StrategyLeg,
-                           symbol: str, exchange: str, quantity: int, results: List):
+                           symbol: str, exchange: str, quantity: int, results: List, thread_index: int):
         """Execute order on a specific account"""
+        import time
+
+        # Add staggered delay based on thread index to prevent OpenAlgo race condition
+        # Each thread waits: index * 150ms (0ms, 150ms, 300ms, 450ms, ...)
+        # This GUARANTEES threads never hit OpenAlgo at the same time
+        delay = thread_index * 0.15
+        if delay > 0:
+            time.sleep(delay)
+            logger.info(f"[THREAD {thread_index}] Waited {delay:.2f}s to prevent race condition")
+
         account_name = account.account_name
         logger.info(f"[THREAD START] Executing leg {leg.leg_number} on account {account_name}: {symbol} {leg.action} qty={quantity}")
 

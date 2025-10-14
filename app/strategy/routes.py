@@ -1071,7 +1071,9 @@ def strategy_positions(strategy_id):
 @login_required
 @api_rate_limit()
 def close_all_positions(strategy_id):
-    """Close all open positions for a strategy"""
+    """Close all open positions for a strategy - PARALLEL EXECUTION"""
+    import threading
+
     try:
         strategy = Strategy.query.filter_by(
             id=strategy_id,
@@ -1097,95 +1099,172 @@ def close_all_positions(strategy_id):
             }), 400
 
         from app.utils.openalgo_client import ExtendedOpenAlgoAPI
+        from app import create_app
 
+        # Thread-safe results collection
         results = []
-        for position in open_positions:
-            try:
-                logger.info(f"Attempting to close position: {position.symbol} on account {position.account.account_name}, leg {position.leg.leg_number}")
+        results_lock = threading.Lock()
 
-                # Reverse the position
-                client = ExtendedOpenAlgoAPI(
-                    api_key=position.account.get_api_key(),
-                    host=position.account.host_url
-                )
+        def close_position_worker(position, strategy_name, product_type, thread_index):
+            """Worker function to close a single position in parallel"""
+            import time
 
-                # Reverse action for closing
-                close_action = 'SELL' if position.leg.action == 'BUY' else 'BUY'
+            # Add staggered delay based on thread index to prevent OpenAlgo race condition
+            # Each thread waits: index * 150ms (0ms, 150ms, 300ms, 450ms, ...)
+            # This GUARANTEES threads never hit OpenAlgo at the same time
+            delay = thread_index * 0.15
+            if delay > 0:
+                time.sleep(delay)
+                logger.info(f"[THREAD {thread_index}] Waited {delay:.2f}s to prevent race condition")
 
-                logger.info(f"Placing close order: {close_action} {position.quantity} {position.symbol} on {position.exchange}")
+            # Create Flask app context for this thread
+            app = create_app()
 
-                response = client.placeorder(
-                    strategy=f"Close_{strategy.name}",
-                    symbol=position.symbol,
-                    exchange=position.exchange,
-                    action=close_action,
-                    quantity=position.quantity,
-                    price_type='MARKET',
-                    product=strategy.product_order_type or 'MIS'
-                )
+            with app.app_context():
+                try:
+                    logger.info(f"[THREAD] Closing position: {position.symbol} on account {position.account.account_name}, leg {position.leg.leg_number}")
 
-                logger.info(f"Close order response for {position.symbol}: {response}")
+                    # Reverse the position
+                    client = ExtendedOpenAlgoAPI(
+                        api_key=position.account.get_api_key(),
+                        host=position.account.host_url
+                    )
 
-                if response.get('status') == 'success':
-                    # Update position status
-                    position.status = 'exited'
-                    position.exit_time = datetime.utcnow()
-                    position.exit_reason = 'manual_close'
+                    # Reverse action for closing
+                    close_action = 'SELL' if position.leg.action == 'BUY' else 'BUY'
 
-                    # Mark leg as executed (since order was placed)
-                    if position.leg and not position.leg.is_executed:
-                        position.leg.is_executed = True
+                    logger.info(f"[THREAD] Placing close order: {close_action} {position.quantity} {position.symbol} on {position.exchange}")
 
-                    # Get exit price
-                    try:
-                        quote = client.quotes(symbol=position.symbol, exchange=position.exchange)
-                        position.exit_price = float(quote.get('data', {}).get('ltp', 0))
-                    except Exception as quote_error:
-                        logger.warning(f"Failed to fetch exit price for {position.symbol}: {quote_error}")
-                        position.exit_price = position.entry_price  # Fallback to entry price
+                    # Place close order with retry logic
+                    max_retries = 3
+                    retry_delay = 1
+                    response = None
+                    last_error = None
 
-                    # Calculate realized P&L
-                    if position.leg.action == 'BUY':
-                        position.realized_pnl = (position.exit_price - position.entry_price) * position.quantity
+                    for attempt in range(max_retries):
+                        try:
+                            response = client.placeorder(
+                                strategy=f"Close_{strategy_name}",
+                                symbol=position.symbol,
+                                exchange=position.exchange,
+                                action=close_action,
+                                quantity=position.quantity,
+                                price_type='MARKET',
+                                product=product_type or 'MIS'
+                            )
+                            if response and isinstance(response, dict):
+                                break
+                        except Exception as api_error:
+                            last_error = str(api_error)
+                            logger.warning(f"[RETRY] Close order attempt {attempt + 1}/{max_retries} failed: {last_error}")
+                            if attempt < max_retries - 1:
+                                import time as time_sleep
+                                time_sleep.sleep(retry_delay)
+                                retry_delay *= 2
+                            else:
+                                response = {'status': 'error', 'message': f'API error after {max_retries} retries: {last_error}'}
+
+                    logger.info(f"[THREAD] Close order response for {position.symbol}: {response}")
+
+                    if response and response.get('status') == 'success':
+                        # Get fresh position from database to avoid stale data
+                        position_to_update = StrategyExecution.query.get(position.id)
+
+                        if position_to_update:
+                            # Update position status
+                            position_to_update.status = 'exited'
+                            position_to_update.exit_time = datetime.utcnow()
+                            position_to_update.exit_reason = 'manual_close'
+                            position_to_update.broker_order_status = 'complete'
+
+                            # Get exit price
+                            try:
+                                quote = client.quotes(symbol=position.symbol, exchange=position.exchange)
+                                position_to_update.exit_price = float(quote.get('data', {}).get('ltp', 0))
+                            except Exception as quote_error:
+                                logger.warning(f"[THREAD] Failed to fetch exit price for {position.symbol}: {quote_error}")
+                                position_to_update.exit_price = position_to_update.entry_price  # Fallback to entry price
+
+                            # Calculate realized P&L
+                            if position.leg.action == 'BUY':
+                                position_to_update.realized_pnl = (position_to_update.exit_price - position_to_update.entry_price) * position_to_update.quantity
+                            else:
+                                position_to_update.realized_pnl = (position_to_update.entry_price - position_to_update.exit_price) * position_to_update.quantity
+
+                            # Commit position update
+                            db.session.commit()
+
+                            logger.info(f"[THREAD SUCCESS] Closed {position.symbol}, P&L: {position_to_update.realized_pnl}")
+
+                            with results_lock:
+                                results.append({
+                                    'symbol': position.symbol,
+                                    'account': position.account.account_name,
+                                    'status': 'success',
+                                    'pnl': position_to_update.realized_pnl
+                                })
+                        else:
+                            logger.error(f"[THREAD] Position {position.id} not found in database")
+                            with results_lock:
+                                results.append({
+                                    'symbol': position.symbol,
+                                    'account': position.account.account_name,
+                                    'status': 'error',
+                                    'error': 'Position not found in database'
+                                })
                     else:
-                        position.realized_pnl = (position.entry_price - position.exit_price) * position.quantity
+                        error_msg = response.get('message', 'Unknown error') if response else 'No response from API'
+                        logger.error(f"[THREAD FAILED] Failed to close {position.symbol}: {error_msg}")
 
-                    logger.info(f"Successfully closed {position.symbol}, P&L: {position.realized_pnl}")
+                        with results_lock:
+                            results.append({
+                                'symbol': position.symbol,
+                                'account': position.account.account_name,
+                                'status': 'failed',
+                                'error': error_msg
+                            })
 
-                    results.append({
-                        'symbol': position.symbol,
-                        'account': position.account.account_name,
-                        'status': 'success',
-                        'pnl': position.realized_pnl
-                    })
-                else:
-                    error_msg = response.get('message', 'Unknown error')
-                    logger.error(f"Failed to close {position.symbol}: {error_msg}")
-                    results.append({
-                        'symbol': position.symbol,
-                        'account': position.account.account_name,
-                        'status': 'failed',
-                        'error': error_msg
-                    })
+                except Exception as e:
+                    logger.error(f"[THREAD ERROR] Exception closing position {position.symbol}: {str(e)}", exc_info=True)
 
-            except Exception as e:
-                logger.error(f"Exception closing position {position.symbol}: {str(e)}", exc_info=True)
-                results.append({
-                    'symbol': position.symbol,
-                    'account': getattr(position.account, 'account_name', 'unknown'),
-                    'status': 'error',
-                    'error': str(e)
-                })
+                    with results_lock:
+                        results.append({
+                            'symbol': position.symbol,
+                            'account': getattr(position.account, 'account_name', 'unknown'),
+                            'status': 'error',
+                            'error': str(e)
+                        })
 
-        db.session.commit()
+        # Create and start threads for parallel execution with staggered delays
+        threads = []
+        logger.info(f"[PARALLEL CLOSE] Starting parallel close for {len(open_positions)} positions")
 
+        for idx, position in enumerate(open_positions):
+            thread = threading.Thread(
+                target=close_position_worker,
+                args=(position, strategy.name, strategy.product_order_type, idx),
+                name=f"ClosePosition_{position.symbol}_{position.account.account_name}"
+            )
+            threads.append(thread)
+            thread.start()
+
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join(timeout=30)  # 30 second timeout per thread
+
+        logger.info(f"[PARALLEL CLOSE] All threads completed. Results: {len(results)}")
+
+        # Calculate summary
         total_pnl = sum(r.get('pnl', 0) for r in results if r.get('status') == 'success')
         successful = len([r for r in results if r.get('status') == 'success'])
+        failed = len([r for r in results if r.get('status') in ['failed', 'error']])
 
         return jsonify({
             'status': 'success',
-            'message': f'Closed {successful}/{len(open_positions)} positions',
+            'message': f'Closed {successful}/{len(open_positions)} positions (parallel execution)',
             'total_pnl': total_pnl,
+            'successful': successful,
+            'failed': failed,
             'results': results
         })
 

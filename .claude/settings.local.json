@@ -26,7 +26,9 @@
       "Bash(cmd //c \"taskkill /F /PID 288092 & taskkill /F /PID 271888 & taskkill /F /PID 238620 & taskkill /F /PID 266468 & taskkill /F /PID 231432\")",
       "Bash(cmd //c \"taskkill /F /PID 142896 & taskkill /F /PID 143264 & taskkill /F /PID 147896 & taskkill /F /PID 147656 & taskkill /F /PID 234096 & taskkill /F /PID 233816 & taskkill /F /PID 274304 & taskkill /F /PID 284024\")",
       "Bash(cmd //c:*)",
-      "Bash(cmd /c \"taskkill /F /PID 303840 & taskkill /F /PID 304048 & taskkill /F /PID 154112 & taskkill /F /PID 303944 & taskkill /F /PID 301028 & taskkill /F /PID 147368 & taskkill /F /PID 314108 & taskkill /F /PID 314156\")"
+      "Bash(cmd /c \"taskkill /F /PID 303840 & taskkill /F /PID 304048 & taskkill /F /PID 154112 & taskkill /F /PID 303944 & taskkill /F /PID 301028 & taskkill /F /PID 147368 & taskkill /F /PID 314108 & taskkill /F /PID 314156\")",
+      "Bash(cmd /c \"taskkill /F /PID 353348 & taskkill /F /PID 353396 & taskkill /F /PID 355196 & taskkill /F /PID 355216 & taskkill /F /PID 355068 & taskkill /F /PID 355064 & taskkill /F /PID 357016 & taskkill /F /PID 357040\")",
+      "Bash(cmd /c \"taskkill /F /PID 353348 & taskkill /F /PID 353396 & taskkill /F /PID 355196 & taskkill /F /PID 355216 & taskkill /F /PID 355068 & taskkill /F /PID 355064 & taskkill /F /PID 372372 & taskkill /F /PID 382472\")"
     ],
     "deny": [],
     "ask": []
