@@ -133,7 +133,11 @@ python app.py
 ## Architecture Overview
 
 ### Core Security Architecture
-The application implements **zero-trust security** with no default accounts. The first registered user automatically becomes admin (determined at runtime in `app/auth/routes.py`). This is a critical security feature - NEVER create default admin accounts.
+The application implements **zero-trust security** with no default accounts. This is a **single-user application**:
+- The first registered user automatically becomes the admin (determined at runtime in `app/auth/routes.py:86-98`)
+- After the first user registers, **all subsequent registration attempts are blocked** (`app/auth/routes.py:87-98`)
+- Only the admin account can log in - no additional user accounts can be created
+- This is a critical security feature - NEVER create default admin accounts or allow multi-user registration
 
 ### Rate Limiting System
 Multi-tier rate limiting is implemented through `app/utils/rate_limiter.py`:
@@ -215,7 +219,7 @@ Structured JSON logging (`app/__init__.py`):
 
 ## Critical Implementation Notes
 
-1. **No Default Accounts**: The system has NO default admin or user accounts by design. First registration becomes admin automatically via `User.query.count() == 0` check.
+1. **Single-User Application**: The system is designed for **ONE user only**. The first registration becomes admin automatically via `User.query.count() == 0` check. After that, registration is permanently blocked. No additional users can register. NEVER implement multi-user functionality.
 
 2. **CSRF Protection**: All forms must include `{{ form.hidden_tag() }}` or use the CSRF token from meta tag.
 

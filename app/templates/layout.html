@@ -149,30 +149,6 @@
                 </div>
                 
                 <div class="flex items-center space-x-3">
-                    <!-- Account Selector -->
-                    {% if current_user.get_active_accounts() %}
-                    <div class="dropdown dropdown-end">
-                        <button class="btn btn-sm btn-ghost">
-                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-4m-5 0H3m2 0h4M9 3h6M9 5h6M9 7h6M9 9h6"></path>
-                            </svg>
-                            <span class="hidden sm:inline">Select Account</span>
-                        </button>
-                        <ul tabindex="0" class="dropdown-content menu p-2 shadow-lg bg-base-200 rounded-lg w-64 mt-2">
-                            {% for account in current_user.get_active_accounts() %}
-                            <li>
-                                <a href="#" onclick="selectAccount('{{ account.id }}')" class="flex items-center justify-between">
-                                    <span>{{ account.account_name }}</span>
-                                    <span class="badge badge-xs {{ 'badge-success' if account.connection_status == 'connected' else 'badge-error' }}">
-                                        {{ account.connection_status }}
-                                    </span>
-                                </a>
-                            </li>
-                            {% endfor %}
-                        </ul>
-                    </div>
-                    {% endif %}
-                    
                     <!-- Theme Toggle -->
                     <button onclick="toggleTheme()" class="btn btn-sm btn-ghost btn-circle">
                         <svg id="theme-icon-light" class="w-5 h-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -226,9 +202,9 @@
                 <!-- Flash Messages -->
                 {% with messages = get_flashed_messages(with_categories=true) %}
                     {% if messages %}
-                        <div class="px-6 pt-4">
+                        <div class="px-6 pt-4" id="flash-messages-container">
                             {% for category, message in messages %}
-                                <div class="alert {{ 'alert-success' if category == 'success' else 'alert-error' if category == 'error' else 'alert-info' }} mb-4">
+                                <div class="alert {{ 'alert-success' if category == 'success' else 'alert-error' if category == 'error' else 'alert-info' }} mb-4 flash-message" data-category="{{ category }}">
                                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         {% if category == 'success' %}
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
@@ -243,6 +219,24 @@
                                 </div>
                             {% endfor %}
                         </div>
+                        <script>
+                            // Auto-dismiss flash messages after 5 seconds (success/info) or 8 seconds (error)
+                            document.addEventListener('DOMContentLoaded', function() {
+                                const flashMessages = document.querySelectorAll('.flash-message');
+                                flashMessages.forEach(function(message) {
+                                    const category = message.getAttribute('data-category');
+                                    const dismissTime = category === 'error' ? 8000 : 5000;
+
+                                    setTimeout(function() {
+                                        message.style.opacity = '0';
+                                        message.style.transition = 'opacity 0.5s ease-out';
+                                        setTimeout(function() {
+                                            message.remove();
+                                        }, 500);
+                                    }, dismissTime);
+                                });
+                            });
+                        </script>
                     {% endif %}
                 {% endwith %}
                 
@@ -273,8 +267,10 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
                     </svg>
                 </button>
-                <a href="{{ url_for('auth.login') }}" class="btn btn-sm btn-ghost">Sign In</a>
-                <a href="{{ url_for('auth.register') }}" class="btn btn-sm btn-primary">Get Started</a>
+                <a href="{{ url_for('auth.login') }}" class="btn btn-sm {% if registration_available %}btn-ghost{% else %}btn-primary{% endif %}">Sign In</a>
+                {% if registration_available %}
+                <a href="{{ url_for('auth.register') }}" class="btn btn-sm btn-primary">Create Admin Account</a>
+                {% endif %}
             </div>
         </nav>
         

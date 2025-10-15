@@ -10,28 +10,26 @@
             <div class="inline-flex items-center justify-center w-16 h-16 bg-primary rounded-xl mb-4">
                 <span class="text-3xl font-bold text-primary-content">A</span>
             </div>
-            <h1 class="text-3xl font-bold">Create your account</h1>
+            <h1 class="text-3xl font-bold">Create Admin Account</h1>
             <p class="text-base-content/60 mt-2">
-                Start managing multiple OpenAlgo accounts
+                Setup the administrator account for this AlgoMirror instance
             </p>
         </div>
         
         <!-- Registration Form Card -->
         <div class="bg-base-100 rounded-xl shadow-xl border border-base-300 p-8">
-            {% if is_first_user %}
-            <!-- First User Alert -->
+            <!-- Admin Registration Alert -->
             <div class="bg-primary/10 border border-primary/20 rounded-lg p-4 mb-6">
                 <div class="flex items-start space-x-3">
                     <svg class="w-5 h-5 text-primary mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                         <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
                     </svg>
                     <div>
-                        <p class="text-sm font-medium text-primary">First User Registration</p>
-                        <p class="text-xs text-base-content/60 mt-1">You'll automatically receive admin privileges</p>
+                        <p class="text-sm font-medium text-primary">Single-User Application</p>
+                        <p class="text-xs text-base-content/60 mt-1">This account will have full administrative privileges. No additional accounts can be created after registration.</p>
                     </div>
                 </div>
             </div>
-            {% endif %}
             
             <form method="POST" class="space-y-4">
                 {{ form.hidden_tag() }}
@@ -115,7 +113,7 @@
                 
                 <!-- Submit Button -->
                 <button type="submit" class="w-full py-3 px-4 bg-primary text-primary-content font-medium rounded-lg hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-base-100 transition-all">
-                    Create Account
+                    Create Admin Account
                 </button>
                 
                 <!-- Terms -->

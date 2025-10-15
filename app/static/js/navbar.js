@@ -1,11 +1,3 @@
-// Account selection functionality
-function selectAccount(accountId) {
-    // Store selected account in session/localStorage for multi-account views
-    localStorage.setItem('selectedAccount', accountId);
-    // Reload current page to reflect the selection
-    location.reload();
-}
-
 // Theme toggle functionality
 function toggleTheme() {
     const currentTheme = localStorage.getItem('theme') || 'light';

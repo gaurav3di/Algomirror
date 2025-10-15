@@ -78,31 +78,6 @@
 
 <div class="navbar-end">
     {% if current_user.is_authenticated %}
-    <!-- Account selector -->
-    <div class="dropdown dropdown-end mr-2 hidden sm:block">
-        <div tabindex="0" role="button" class="btn btn-ghost btn-sm">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-4m-5 0H3m2 0h4M9 3h6M9 5h6M9 7h6M9 9h6" />
-            </svg>
-            <span class="hidden lg:inline ml-1">Accounts</span>
-        </div>
-        <ul tabindex="0" class="dropdown-content z-50 menu p-2 shadow bg-base-100 rounded-box w-52">
-            {% for account in current_user.get_active_accounts() %}
-            <li>
-                <a href="#" onclick="selectAccount('{{ account.id }}')" class="flex items-center justify-between">
-                    <span>{{ account.account_name }}</span>
-                    <span class="badge badge-{{ 'success' if account.connection_status == 'connected' else 'error' }} badge-xs">
-                        {{ account.connection_status }}
-                    </span>
-                </a>
-            </li>
-            {% endfor %}
-            {% if not current_user.get_active_accounts() %}
-            <li><a href="{{ url_for('accounts.add') }}">Add First Account</a></li>
-            {% endif %}
-        </ul>
-    </div>
-    
     <!-- Theme toggle -->
     <button onclick="toggleTheme()" class="btn btn-ghost btn-circle btn-sm" aria-label="Toggle theme">
         <!-- Sun icon for light theme -->

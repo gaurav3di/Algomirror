@@ -194,7 +194,14 @@ def create_app(config_name=None):
     app.register_blueprint(strategy_bp)  # url_prefix defined in blueprint
     app.register_blueprint(margin_bp)  # url_prefix defined in blueprint
     app.register_blueprint(api_bp, url_prefix='/api')
-    
+
+    # Context processor for global template variables
+    @app.context_processor
+    def inject_registration_status():
+        """Make registration_available variable available to all templates"""
+        from app.models import User
+        return dict(registration_available=(User.query.count() == 0))
+
     # Create database tables
     with app.app_context():
         db.create_all()

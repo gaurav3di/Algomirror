@@ -94,15 +94,17 @@
             </form>
         </div>
         
-        <!-- Sign Up Link -->
+        <!-- Sign Up Link (only shown if no admin exists) -->
+        {% if registration_available %}
         <div class="text-center mt-6">
             <p class="text-sm text-base-content/60">
                 Don't have an account?
                 <a href="{{ url_for('auth.register') }}" class="text-primary hover:underline font-medium">
-                    Sign up for free
+                    Create Admin Account
                 </a>
             </p>
         </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

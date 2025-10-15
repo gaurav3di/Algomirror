@@ -33,21 +33,23 @@
                     </svg>
                 </a>
                 {% else %}
+                {% if registration_available %}
                 <a href="{{ url_for('auth.register') }}" class="btn btn-primary btn-lg">
-                    Start Free
+                    Create Admin Account
                     <svg class="w-5 h-5 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
                     </svg>
                 </a>
-                <a href="{{ url_for('auth.login') }}" class="btn btn-ghost btn-lg">
+                {% endif %}
+                <a href="{{ url_for('auth.login') }}" class="btn {% if registration_available %}btn-ghost{% else %}btn-primary{% endif %} btn-lg">
                     Sign In
                 </a>
                 {% endif %}
             </div>
             
-            {% if not current_user.is_authenticated %}
+            {% if not current_user.is_authenticated and registration_available %}
             <p class="text-sm text-base-content/50 mt-6">
-                No credit card required • First user becomes admin
+                No credit card required • Single-user application • First registration becomes admin
             </p>
             {% endif %}
         </div>
@@ -156,23 +158,35 @@
         </div>
         
         <!-- CTA Section -->
+        {% if not current_user.is_authenticated %}
         <div class="text-center py-12 px-8 rounded-2xl bg-gradient-to-r from-primary/10 to-secondary/10 border border-primary/20">
-            <h2 class="text-3xl font-bold mb-4">Ready to Streamline Your Trading?</h2>
+            <h2 class="text-3xl font-bold mb-4">{% if registration_available %}Ready to Streamline Your Trading?{% else %}Access Your Dashboard{% endif %}</h2>
             <p class="text-lg text-base-content/60 mb-8 max-w-2xl mx-auto">
-                Join traders who are already using AlgoMirror to efficiently manage their multiple OpenAlgo accounts.
+                {% if registration_available %}
+                Setup your AlgoMirror instance to efficiently manage your multiple OpenAlgo accounts.
+                {% else %}
+                Sign in to access your AlgoMirror dashboard and manage your trading accounts.
+                {% endif %}
             </p>
             <div class="flex flex-col sm:flex-row gap-4 justify-center">
+                {% if registration_available %}
                 <a href="{{ url_for('auth.register') }}" class="btn btn-primary btn-lg">
-                    Get Started Free
+                    Create Admin Account
                 </a>
-                <a href="https://docs.openalgo.in" target="_blank" class="btn btn-ghost btn-lg">
+                {% endif %}
+                <a href="{% if registration_available %}https://docs.openalgo.in{% else %}{{ url_for('auth.login') }}{% endif %}" {% if registration_available %}target="_blank"{% endif %} class="btn {% if registration_available %}btn-ghost{% else %}btn-primary{% endif %} btn-lg">
+                    {% if registration_available %}
                     <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
                     </svg>
                     Documentation
+                    {% else %}
+                    Sign In
+                    {% endif %}
                 </a>
             </div>
         </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

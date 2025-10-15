@@ -1,7 +1,7 @@
 from flask import render_template, redirect, url_for, current_app
 from flask_login import login_required, current_user
 from app.main import main_bp
-from app.models import TradingAccount, ActivityLog
+from app.models import TradingAccount, ActivityLog, User
 from openalgo import api
 from datetime import datetime
 from sqlalchemy import desc
@@ -10,7 +10,11 @@ from sqlalchemy import desc
 def index():
     if current_user.is_authenticated:
         return redirect(url_for('main.dashboard'))
-    return render_template('main/index.html')
+
+    # Check if registration is available (single-user app - only if no users exist)
+    registration_available = (User.query.count() == 0)
+
+    return render_template('main/index.html', registration_available=registration_available)
 
 @main_bp.route('/dashboard')
 @login_required
