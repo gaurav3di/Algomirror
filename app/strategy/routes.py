@@ -206,9 +206,19 @@ def builder(strategy_id=None):
             for i, leg_data in enumerate(data.get('legs', [])):
                 leg_number = existing_leg_count + i + 1  # Start after executed legs
 
+                # SAFETY CHECK: Validate lots for Fixed Lot Size mode
+                lots = leg_data.get('lots', 1)
+                if strategy.risk_profile == 'fixed_lots':
+                    MAX_LOTS = 100  # Hard limit for fixed lot size mode
+                    if lots and lots > MAX_LOTS:
+                        return jsonify({
+                            'status': 'error',
+                            'message': f'Safety limit exceeded: Maximum {MAX_LOTS} lots allowed per leg in Fixed Lot Size mode. Leg {leg_number} has {lots} lots.'
+                        }), 400
+
                 # Log the received data for debugging
                 logger.info(f"Saving leg {leg_number}: instrument={leg_data.get('instrument')}, "
-                           f"lots={leg_data.get('lots')}, quantity={leg_data.get('quantity')}")
+                           f"lots={lots}, quantity={leg_data.get('quantity')}")
 
                 leg = StrategyLeg(
                     strategy_id=strategy.id,
@@ -227,7 +237,7 @@ def builder(strategy_id=None):
                     limit_price=leg_data.get('limit_price'),
                     trigger_price=leg_data.get('trigger_price'),
                     quantity=leg_data.get('quantity'),
-                    lots=leg_data.get('lots', 1),
+                    lots=lots,
                     stop_loss_type=leg_data.get('stop_loss_type'),
                     stop_loss_value=leg_data.get('stop_loss_value'),
                     take_profit_type=leg_data.get('take_profit_type'),

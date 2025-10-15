@@ -467,8 +467,8 @@
             </div>
 
             <div class="form-control">
-                <label class="label"><span class="label-text text-xs">8. Lots</span></label>
-                <input type="number" class="input input-bordered input-sm leg-lots" value="1" min="1">
+                <label class="label"><span class="label-text text-xs">8. Lots (Max: 100)</span></label>
+                <input type="number" class="input input-bordered input-sm leg-lots" value="1" min="1" max="100">
             </div>
 
             <!-- Row 3: Order Type, Limit Price -->
@@ -1034,6 +1034,29 @@ function toggleStrikeInput(select) {
 function saveStrategy(execute = false) {
     const riskProfile = document.getElementById('riskProfile').value;
     const isFixedLots = riskProfile === 'fixed_lots';
+
+    // SAFETY CHECK: Validate lots before processing
+    const MAX_LOTS = 100;
+    if (isFixedLots) {
+        const invalidLegs = [];
+        document.querySelectorAll('.leg-item').forEach((legItem, index) => {
+            // Skip executed or pending legs
+            if (legItem.dataset.isExecuted === 'true' || legItem.dataset.isPending === 'true') {
+                return;
+            }
+
+            const lots = parseInt(legItem.querySelector('.leg-lots').value) || 1;
+            if (lots > MAX_LOTS) {
+                const legNumber = legItem.querySelector('.leg-number').textContent;
+                invalidLegs.push(`Leg ${legNumber}: ${lots} lots`);
+            }
+        });
+
+        if (invalidLegs.length > 0) {
+            showNotification(`Safety limit exceeded: Maximum ${MAX_LOTS} lots allowed per leg. Invalid legs: ${invalidLegs.join(', ')}`, 'error');
+            return; // Stop execution
+        }
+    }
 
     const legs = [];
     document.querySelectorAll('.leg-item').forEach((legItem, index) => {
