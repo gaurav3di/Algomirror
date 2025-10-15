@@ -173,9 +173,29 @@ def builder(strategy_id=None):
             strategy.product_order_type = data.get('product_order_type', 'MIS')
             strategy.selected_accounts = data.get('selected_accounts', [])
             strategy.allocation_type = data.get('allocation_type', 'equal')
-            strategy.max_loss = data.get('max_loss')
-            strategy.max_profit = data.get('max_profit')
-            strategy.trailing_sl = data.get('trailing_sl')
+
+            # Risk management fields (mutually exclusive)
+            # If Supertrend exit is enabled, clear traditional risk management
+            if data.get('supertrend_exit_enabled'):
+                strategy.max_loss = None
+                strategy.max_profit = None
+                strategy.trailing_sl = None
+                strategy.supertrend_exit_enabled = True
+                strategy.supertrend_exit_type = data.get('supertrend_exit_type')
+                strategy.supertrend_period = data.get('supertrend_period', 7)
+                strategy.supertrend_multiplier = data.get('supertrend_multiplier', 3.0)
+                strategy.supertrend_timeframe = data.get('supertrend_timeframe', '5m')
+                # Don't reset triggered flag - it should persist for this strategy
+            else:
+                # Traditional risk management
+                strategy.max_loss = data.get('max_loss')
+                strategy.max_profit = data.get('max_profit')
+                strategy.trailing_sl = data.get('trailing_sl')
+                strategy.supertrend_exit_enabled = False
+                strategy.supertrend_exit_type = None
+                strategy.supertrend_period = None
+                strategy.supertrend_multiplier = None
+                strategy.supertrend_timeframe = None
 
             # Save strategy first to get ID
             db.session.flush()

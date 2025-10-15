@@ -271,6 +271,14 @@ class Strategy(db.Model):
     max_profit = db.Column(db.Float)
     trailing_sl = db.Column(db.Float)
 
+    # Supertrend-based exit
+    supertrend_exit_enabled = db.Column(db.Boolean, default=False)
+    supertrend_exit_type = db.Column(db.String(20))  # 'breakout' or 'breakdown'
+    supertrend_period = db.Column(db.Integer, default=7)
+    supertrend_multiplier = db.Column(db.Float, default=3.0)
+    supertrend_timeframe = db.Column(db.String(10), default='5m')
+    supertrend_exit_triggered = db.Column(db.Boolean, default=False)  # Track if exit was already executed
+
     # Order settings
     product_order_type = db.Column(db.String(10), default='MIS')  # 'MIS' or 'NRML'
 

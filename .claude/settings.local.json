@@ -32,7 +32,8 @@
       "Bash(cmd /c \"taskkill /F /PID 411832 & taskkill /F /PID 400436 & taskkill /F /PID 412756 & taskkill /F /PID 412092 & taskkill /F /PID 410828 & taskkill /F /PID 407104 & taskkill /F /PID 446768 & taskkill /F /PID 447072\")",
       "Bash(cmd /c:*)",
       "Bash(iconv:*)",
-      "WebFetch(domain:tradingview.github.io)"
+      "WebFetch(domain:tradingview.github.io)",
+      "Bash(.venvScriptsactivate)"
     ],
     "deny": [],
     "ask": []

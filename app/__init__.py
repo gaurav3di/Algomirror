@@ -222,6 +222,11 @@ def create_app(config_name=None):
     order_status_poller.start()
     app.logger.info('Order status poller started', extra={'event': 'poller_init'})
 
+    # Initialize Supertrend exit monitoring service
+    from app.utils.supertrend_exit_service import supertrend_exit_service
+    supertrend_exit_service.start_service()
+    app.logger.info('Supertrend exit monitoring service started', extra={'event': 'supertrend_exit_init'})
+
     # Load existing primary and backup accounts within app context
     with app.app_context():
         from app.models import TradingAccount

@@ -135,30 +135,101 @@
         <div class="card bg-base-100 shadow-lg mb-6">
             <div class="card-body">
                 <h2 class="card-title mb-4">Risk Management</h2>
+                <p class="text-sm text-base-content/70 mb-4">Choose ONE risk management strategy - options are mutually exclusive</p>
 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div class="form-control">
-                        <label class="label">
-                            <span class="label-text">Max Loss (₹)</span>
+                <!-- Traditional Risk Management -->
+                <div id="traditional-risk-section">
+                    <div class="flex items-center mb-3">
+                        <input type="radio" id="useTraditionalRisk" name="riskManagementType" value="traditional"
+                               class="radio radio-primary" checked onchange="toggleRiskManagementType()">
+                        <label for="useTraditionalRisk" class="label ml-2 cursor-pointer">
+                            <span class="label-text font-semibold">Traditional Risk Management (Max Loss/Profit, Trailing SL)</span>
                         </label>
-                        <input type="number" id="maxLoss" class="input input-bordered"
-                               placeholder="5000" value="{{ strategy.max_loss if strategy else '' }}">
                     </div>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 ml-6" id="traditional-risk-fields">
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Max Loss (₹)</span>
+                            </label>
+                            <input type="number" id="maxLoss" class="input input-bordered"
+                                   placeholder="5000" value="{{ strategy.max_loss if strategy else '' }}">
+                        </div>
 
-                    <div class="form-control">
-                        <label class="label">
-                            <span class="label-text">Max Profit (₹)</span>
-                        </label>
-                        <input type="number" id="maxProfit" class="input input-bordered"
-                               placeholder="10000" value="{{ strategy.max_profit if strategy else '' }}">
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Max Profit (₹)</span>
+                            </label>
+                            <input type="number" id="maxProfit" class="input input-bordered"
+                                   placeholder="10000" value="{{ strategy.max_profit if strategy else '' }}">
+                        </div>
+
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Trailing Stop Loss (%)</span>
+                            </label>
+                            <input type="number" id="trailingSl" class="input input-bordered"
+                                   placeholder="20" step="0.1" value="{{ strategy.trailing_sl if strategy else '' }}">
+                        </div>
                     </div>
+                </div>
 
-                    <div class="form-control">
-                        <label class="label">
-                            <span class="label-text">Trailing Stop Loss (%)</span>
+                <div class="divider">OR</div>
+
+                <!-- Supertrend-based Exit -->
+                <div id="supertrend-risk-section">
+                    <div class="flex items-center mb-3">
+                        <input type="radio" id="useSupertrendExit" name="riskManagementType" value="supertrend"
+                               class="radio radio-primary" onchange="toggleRiskManagementType()"
+                               {% if strategy and strategy.supertrend_exit_enabled %}checked{% endif %}>
+                        <label for="useSupertrendExit" class="label ml-2 cursor-pointer">
+                            <span class="label-text font-semibold">Supertrend-based Exit (Monitors combined spread)</span>
                         </label>
-                        <input type="number" id="trailingSl" class="input input-bordered"
-                               placeholder="20" step="0.1" value="{{ strategy.trailing_sl if strategy else '' }}">
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 ml-6" id="supertrend-risk-fields">
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Exit Type</span>
+                            </label>
+                            <select id="supertrendExitType" class="select select-bordered" disabled>
+                                <option value="breakout" {% if strategy and strategy.supertrend_exit_type == 'breakout' %}selected{% endif %}>Upper Breakout (Price closes above Supertrend)</option>
+                                <option value="breakdown" {% if strategy and strategy.supertrend_exit_type == 'breakdown' %}selected{% endif %}>Downside Breakdown (Price closes below Supertrend)</option>
+                            </select>
+                        </div>
+
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Timeframe</span>
+                            </label>
+                            <select id="supertrendTimeframe" class="select select-bordered" disabled>
+                                <option value="1m" {% if strategy and strategy.supertrend_timeframe == '1m' %}selected{% endif %}>1 Minute</option>
+                                <option value="5m" {% if strategy and strategy.supertrend_timeframe == '5m' %}selected{% elif not strategy %}selected{% endif %}>5 Minutes (Default)</option>
+                                <option value="15m" {% if strategy and strategy.supertrend_timeframe == '15m' %}selected{% endif %}>15 Minutes</option>
+                            </select>
+                        </div>
+
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Supertrend Period (ATR)</span>
+                            </label>
+                            <input type="number" id="supertrendPeriod" class="input input-bordered"
+                                   placeholder="7" min="5" max="20" disabled
+                                   value="{{ strategy.supertrend_period if strategy and strategy.supertrend_period else '7' }}">
+                        </div>
+
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Supertrend Multiplier</span>
+                            </label>
+                            <input type="number" id="supertrendMultiplier" class="input input-bordered"
+                                   placeholder="3.0" min="1" max="10" step="0.5" disabled
+                                   value="{{ strategy.supertrend_multiplier if strategy and strategy.supertrend_multiplier else '3.0' }}">
+                        </div>
+                    </div>
+                    <div class="alert alert-info mt-4 ml-6">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        <div>
+                            <p class="text-sm"><strong>Note:</strong> Exit triggers only once per strategy on candle close. Monitors combined spread with Supertrend indicator. All positions will be closed in parallel when the exit signal is triggered.</p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -980,6 +1051,43 @@ async function checkAndFreezePendingLegs() {
     {% endif %}
 }
 
+// Toggle risk management type (Traditional vs Supertrend)
+function toggleRiskManagementType() {
+    const useTraditional = document.getElementById('useTraditionalRisk').checked;
+
+    // Get all traditional fields
+    const traditionalFields = document.querySelectorAll('#traditional-risk-fields input');
+
+    // Get all supertrend fields
+    const supertrendFields = document.querySelectorAll('#supertrend-risk-fields input, #supertrend-risk-fields select');
+
+    if (useTraditional) {
+        // Enable traditional fields
+        traditionalFields.forEach(field => {
+            field.disabled = false;
+            field.classList.remove('input-disabled', 'cursor-not-allowed');
+        });
+
+        // Disable and clear supertrend fields
+        supertrendFields.forEach(field => {
+            field.disabled = true;
+            field.classList.add('input-disabled', 'cursor-not-allowed');
+        });
+    } else {
+        // Disable and clear traditional fields
+        traditionalFields.forEach(field => {
+            field.disabled = true;
+            field.classList.add('input-disabled', 'cursor-not-allowed');
+        });
+
+        // Enable supertrend fields
+        supertrendFields.forEach(field => {
+            field.disabled = false;
+            field.classList.remove('input-disabled', 'cursor-not-allowed');
+        });
+    }
+}
+
 // Toggle lot fields based on risk profile selection
 function toggleLotFields() {
     const riskProfile = document.getElementById('riskProfile').value;
@@ -1124,6 +1232,9 @@ function saveStrategy(execute = false) {
     const selectedAccounts = Array.from(document.querySelectorAll('input[name="accounts"]:checked'))
         .map(cb => parseInt(cb.value));
 
+    // Determine which risk management type is selected
+    const useTraditional = document.getElementById('useTraditionalRisk').checked;
+
     const strategyData = {
         name: document.getElementById('strategyName').value,
         risk_profile: document.getElementById('riskProfile').value,
@@ -1131,9 +1242,16 @@ function saveStrategy(execute = false) {
         product_order_type: document.getElementById('productOrderType').value,
         selected_accounts: selectedAccounts,
         allocation_type: 'equal',
-        max_loss: parseFloat(document.getElementById('maxLoss').value) || null,
-        max_profit: parseFloat(document.getElementById('maxProfit').value) || null,
-        trailing_sl: parseFloat(document.getElementById('trailingSl').value) || null,
+        // Traditional risk management (only if selected)
+        max_loss: useTraditional ? (parseFloat(document.getElementById('maxLoss').value) || null) : null,
+        max_profit: useTraditional ? (parseFloat(document.getElementById('maxProfit').value) || null) : null,
+        trailing_sl: useTraditional ? (parseFloat(document.getElementById('trailingSl').value) || null) : null,
+        // Supertrend exit settings (only if selected)
+        supertrend_exit_enabled: !useTraditional,
+        supertrend_exit_type: !useTraditional ? document.getElementById('supertrendExitType').value : null,
+        supertrend_period: !useTraditional ? parseInt(document.getElementById('supertrendPeriod').value) || 7 : null,
+        supertrend_multiplier: !useTraditional ? parseFloat(document.getElementById('supertrendMultiplier').value) || 3.0 : null,
+        supertrend_timeframe: !useTraditional ? document.getElementById('supertrendTimeframe').value : null,
         legs: legs
     };
 
@@ -1240,6 +1358,9 @@ function showNotification(message, type) {
 document.addEventListener('DOMContentLoaded', async function() {
     // Fetch lot sizes from database first
     await fetchLotSizes();
+
+    // Initialize risk management toggle state
+    toggleRiskManagementType();
 
     {% if strategy_legs and strategy_legs|length > 0 %}
         // Load existing legs
