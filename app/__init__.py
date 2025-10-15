@@ -185,6 +185,7 @@ def create_app(config_name=None):
     from app.strategy import strategy_bp
     from app.margin import margin_bp
     from app.api import api_bp
+    from app.tradingview import tradingview_bp
 
     app.register_blueprint(auth_bp, url_prefix='/auth')
     app.register_blueprint(main_bp)
@@ -194,6 +195,7 @@ def create_app(config_name=None):
     app.register_blueprint(strategy_bp)  # url_prefix defined in blueprint
     app.register_blueprint(margin_bp)  # url_prefix defined in blueprint
     app.register_blueprint(api_bp, url_prefix='/api')
+    app.register_blueprint(tradingview_bp)  # url_prefix defined in blueprint (/tradingview)
 
     # Context processor for global template variables
     @app.context_processor

@@ -330,6 +330,14 @@
 
         <!-- Action Buttons -->
         <div class="flex justify-end gap-3">
+            {% if strategy %}
+            <a href="{{ url_for('tradingview.strategy_monitor', strategy_id=strategy.id) }}" class="btn btn-info btn-outline" target="_blank">
+                <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                </svg>
+                Spread Monitor
+            </a>
+            {% endif %}
             <button type="button" onclick="saveAsTemplate()" class="btn btn-ghost">Save as Template</button>
             <button type="button" onclick="saveStrategy(false)" class="btn btn-outline btn-primary">Save Strategy</button>
             <button type="button" onclick="saveStrategy(true)" class="btn btn-primary">Save & Execute</button>

@@ -1,0 +1,421 @@
+{% extends "layout.html" %}
+
+{% block title %}Spread Monitor - {{ strategy.name }} - AlgoMirror{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-6">
+        <div>
+            <h1 class="text-2xl font-bold">Spread Monitor: {{ strategy.name }}</h1>
+            <p class="text-base-content/70">Real-time spread monitoring with Supertrend indicator</p>
+        </div>
+        <div class="flex gap-2">
+            <a href="{{ url_for('strategy.builder', strategy_id=strategy.id) }}" class="btn btn-ghost btn-sm">
+                <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                </svg>
+                Back to Strategy
+            </a>
+        </div>
+    </div>
+
+    <!-- Placed Symbols Info Card -->
+    {% if placed_symbols %}
+    <div class="card bg-base-100 shadow-lg mb-6">
+        <div class="card-body">
+            <h3 class="font-semibold mb-2">Placed Symbols (Real-time Data):</h3>
+            <div class="flex flex-wrap gap-2">
+                {% for item in placed_symbols %}
+                <div class="badge badge-lg badge-outline">
+                    Leg {{ item.leg_number }}: {{ item.symbol }}
+                    <span class="ml-1 text-xs opacity-70">({{ item.strike_format }})</span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Strategy Info Card -->
+    <div class="card bg-base-100 shadow-lg mb-6">
+        <div class="card-body">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="stat">
+                    <div class="stat-title">Strategy</div>
+                    <div class="stat-value text-lg">{{ strategy.name }}</div>
+                    <div class="stat-desc">{{ legs|length }} Leg{{ 's' if legs|length != 1 else '' }}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Current Signal</div>
+                    <div class="stat-value text-lg" id="currentSignal">
+                        <span class="loading loading-spinner loading-sm"></span>
+                    </div>
+                    <div class="stat-desc" id="signalTime">Calculating...</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Timeframe</div>
+                    <div class="stat-value text-lg">
+                        <select id="intervalSelect" class="select select-bordered select-sm">
+                            <option value="1m">1 Min</option>
+                            <option value="5m" selected>5 Min</option>
+                            <option value="15m">15 Min</option>
+                        </select>
+                    </div>
+                    <div class="stat-desc">Chart Interval</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Days to Load</div>
+                    <div class="stat-value text-lg">
+                        <select id="daysSelect" class="select select-bordered select-sm">
+                            <option value="1">1 Day</option>
+                            <option value="2">2 Days</option>
+                            <option value="3" selected>3 Days</option>
+                            <option value="4">4 Days</option>
+                            <option value="5">5 Days</option>
+                        </select>
+                    </div>
+                    <div class="stat-desc">Historical Data</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Supertrend Period</div>
+                    <div class="stat-value text-lg">
+                        <select id="periodSelect" class="select select-bordered select-sm">
+                            <option value="5">5</option>
+                            <option value="7" selected>7</option>
+                            <option value="10">10</option>
+                            <option value="14">14</option>
+                        </select>
+                    </div>
+                    <div class="stat-desc">ATR Period</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Multiplier</div>
+                    <div class="stat-value text-lg">
+                        <select id="multiplierSelect" class="select select-bordered select-sm">
+                            <option value="2">2.0</option>
+                            <option value="2.5">2.5</option>
+                            <option value="3" selected>3.0</option>
+                            <option value="3.5">3.5</option>
+                            <option value="4">4.0</option>
+                        </select>
+                    </div>
+                    <div class="stat-desc">ATR Multiplier</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart Card -->
+    <div class="card bg-base-100 shadow-lg mb-6">
+        <div class="card-body">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="card-title">Combined Premium with Supertrend</h2>
+                <div class="flex gap-2">
+                    <button onclick="refreshChart()" class="btn btn-ghost btn-sm">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                    <div class="form-control">
+                        <label class="label cursor-pointer gap-2">
+                            <span class="label-text text-xs">Auto-Update (5s)</span>
+                            <input type="checkbox" id="autoUpdateToggle" class="toggle toggle-primary toggle-sm" />
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Container -->
+            <div id="chartContainer" style="height: 500px; position: relative;">
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="loading loading-spinner loading-lg"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Strategy Legs Info -->
+    <div class="card bg-base-100 shadow-lg">
+        <div class="card-body">
+            <h2 class="card-title mb-4">Strategy Legs</h2>
+            <div class="overflow-x-auto">
+                <table class="table table-compact">
+                    <thead>
+                        <tr>
+                            <th>Leg #</th>
+                            <th>Symbol</th>
+                            <th>Product</th>
+                            <th>Action</th>
+                            <th>Option Type</th>
+                            <th>Strike</th>
+                            <th>Lots</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for leg in legs %}
+                        {% set leg_symbol = placed_symbols|selectattr('leg_number', 'equalto', leg.leg_number)|first %}
+                        <tr>
+                            <td>{{ leg.leg_number }}</td>
+                            <td>
+                                {% if leg_symbol %}
+                                <span class="badge badge-outline">{{ leg_symbol.symbol }}</span>
+                                {% else %}
+                                <span class="badge badge-outline badge-ghost">{{ leg.instrument }}</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ leg.product_type|upper }}</td>
+                            <td>
+                                <span class="badge {{ 'badge-success' if leg.action == 'BUY' else 'badge-error' }}">
+                                    {{ leg.action }}
+                                </span>
+                            </td>
+                            <td>{{ leg.option_type or '-' }}</td>
+                            <td>{{ leg.strike_selection or '-' }}</td>
+                            <td>{{ leg.lots or 1 }}</td>
+                            <td>
+                                {% if leg.is_executed %}
+                                <span class="badge badge-success">Executed</span>
+                                {% else %}
+                                <span class="badge badge-warning">Pending</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Load TradingView Lightweight Charts -->
+<script src="{{ url_for('static', filename='js/lightweight-charts.js') }}"></script>
+
+<script>
+const strategyId = {{ strategy.id }};
+let chart = null;
+let premiumSeries = null;
+let supertrendSeries = null;
+let autoUpdateInterval = null;
+
+// Get theme-aware colors
+function getThemeColors() {
+    const htmlElement = document.documentElement;
+    const theme = htmlElement.getAttribute('data-theme') || 'dark';
+
+    // Define colors for light and dark themes (matching DaisyUI)
+    if (theme === 'dark') {
+        return {
+            background: '#1f2937',
+            textColor: '#d1d5db',
+            gridColor: 'rgba(75, 85, 99, 0.3)',
+            borderColor: 'rgba(75, 85, 99, 0.5)',
+            priceLineColor: '#ffffff', // White for dark mode
+        };
+    } else {
+        return {
+            background: '#ffffff',
+            textColor: '#374151',
+            gridColor: 'rgba(209, 213, 219, 0.5)',
+            borderColor: 'rgba(209, 213, 219, 0.8)',
+            priceLineColor: '#000000', // Black for light mode
+        };
+    }
+}
+
+// Initialize chart
+function initChart() {
+    const container = document.getElementById('chartContainer');
+    container.innerHTML = ''; // Clear loading spinner
+
+    const colors = getThemeColors();
+
+    chart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: 500,
+        layout: {
+            background: { color: colors.background },
+            textColor: colors.textColor,
+        },
+        grid: {
+            vertLines: { color: colors.gridColor },
+            horzLines: { color: colors.gridColor },
+        },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+        },
+        rightPriceScale: {
+            borderColor: colors.borderColor,
+        },
+        timeScale: {
+            borderColor: colors.borderColor,
+            timeVisible: true,
+            secondsVisible: false,
+        },
+    });
+
+    // Create line series for combined premium (v5 API) - black in light mode, white in dark mode
+    premiumSeries = chart.addSeries(LightweightCharts.LineSeries, {
+        color: colors.priceLineColor,
+        lineWidth: 2,
+        title: 'Combined Premium',
+    });
+
+    // Create line series for Supertrend (v5 API)
+    supertrendSeries = chart.addSeries(LightweightCharts.LineSeries, {
+        color: '#ef4444',
+        lineWidth: 2,
+        title: 'Supertrend',
+    });
+
+    // Handle window resize
+    window.addEventListener('resize', () => {
+        chart.applyOptions({ width: container.clientWidth });
+    });
+}
+
+// Fetch and update chart data
+async function updateChart() {
+    try {
+        const period = document.getElementById('periodSelect').value;
+        const multiplier = document.getElementById('multiplierSelect').value;
+        const interval = document.getElementById('intervalSelect').value;
+        const days = document.getElementById('daysSelect').value;
+
+        const response = await fetch(
+            `/tradingview/api/chart-data/${strategyId}?period=${period}&multiplier=${multiplier}&interval=${interval}&days=${days}`
+        );
+        const result = await response.json();
+
+        if (result.status === 'success') {
+            const data = result.data;
+
+            // Prepare line data for combined premium (using close price)
+            const premiumData = data.map(d => ({
+                time: d.time,
+                value: d.close,
+            }));
+
+            // Prepare Supertrend data (filter out nulls)
+            const supertrendData = data
+                .filter(d => d.supertrend !== null)
+                .map(d => ({
+                    time: d.time,
+                    value: d.supertrend,
+                }));
+
+            // Update series
+            premiumSeries.setData(premiumData);
+            supertrendSeries.setData(supertrendData);
+
+            // Update signal display
+            updateSignal(result.signal);
+
+            console.log(`Chart updated: ${data.length} bars, Signal: ${result.signal}`);
+        } else {
+            console.error('Failed to fetch chart data:', result.message);
+            showNotification(result.message || 'Failed to load chart data', 'error');
+        }
+    } catch (error) {
+        console.error('Error updating chart:', error);
+        showNotification('Error updating chart', 'error');
+    }
+}
+
+// Update signal display
+function updateSignal(signal) {
+    const signalElement = document.getElementById('currentSignal');
+    const timeElement = document.getElementById('signalTime');
+
+    let badgeClass = 'badge-ghost';
+    if (signal === 'BUY') {
+        badgeClass = 'badge-success';
+    } else if (signal === 'SELL') {
+        badgeClass = 'badge-error';
+    }
+
+    signalElement.innerHTML = `<span class="badge ${badgeClass} badge-lg">${signal}</span>`;
+    timeElement.textContent = new Date().toLocaleTimeString();
+}
+
+// Refresh chart manually
+function refreshChart() {
+    updateChart();
+    showNotification('Chart refreshed', 'success');
+}
+
+// Show notification
+function showNotification(message, type) {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-end`;
+
+    let alertClass = 'alert-info';
+    if (type === 'success') alertClass = 'alert-success';
+    else if (type === 'error') alertClass = 'alert-error';
+    else if (type === 'warning') alertClass = 'alert-warning';
+
+    toast.innerHTML = `
+        <div class="alert ${alertClass}">
+            <span>${message}</span>
+        </div>
+    `;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+}
+
+// Start auto-update
+function startAutoUpdate() {
+    if (autoUpdateInterval) {
+        clearInterval(autoUpdateInterval);
+    }
+    autoUpdateInterval = setInterval(() => {
+        updateChart();
+    }, 5000); // Update every 5 seconds
+    console.log('Auto-update started (5 second interval)');
+}
+
+// Stop auto-update
+function stopAutoUpdate() {
+    if (autoUpdateInterval) {
+        clearInterval(autoUpdateInterval);
+        autoUpdateInterval = null;
+    }
+    console.log('Auto-update stopped');
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    initChart();
+    updateChart();
+
+    // Handle auto-update toggle (OFF by default)
+    const autoUpdateToggle = document.getElementById('autoUpdateToggle');
+    // Don't start auto-update on load since toggle is unchecked by default
+
+    autoUpdateToggle.addEventListener('change', function() {
+        if (this.checked) {
+            startAutoUpdate();
+        } else {
+            stopAutoUpdate();
+        }
+    });
+
+    // Handle parameter changes
+    document.getElementById('periodSelect').addEventListener('change', updateChart);
+    document.getElementById('multiplierSelect').addEventListener('change', updateChart);
+    document.getElementById('intervalSelect').addEventListener('change', updateChart);
+    document.getElementById('daysSelect').addEventListener('change', updateChart);
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', function() {
+    stopAutoUpdate();
+    if (chart) {
+        chart.remove();
+    }
+});
+</script>
+{% endblock %}
