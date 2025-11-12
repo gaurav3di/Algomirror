@@ -457,6 +457,7 @@
                                     <th>Symbol</th>
                                     <th>Risk</th>
                                     <th>Product</th>
+                                    <th>Type</th>
                                     <th>Action</th>
                                     <th>Qty</th>
                                     <th>Avg Price</th>
@@ -1917,12 +1918,29 @@ async function loadPositions(strategyId) {
                         </button>` :
                         '<span class="badge badge-ghost badge-sm">Closed</span>';
 
+                    // Detect instrument type from symbol
+                    let instrumentType = '-';
+                    let typeBadgeClass = 'badge-ghost';
+                    const symbol = position.symbol.toUpperCase();
+
+                    if (symbol.endsWith('CE')) {
+                        instrumentType = 'CE';
+                        typeBadgeClass = 'badge-success';
+                    } else if (symbol.endsWith('PE')) {
+                        instrumentType = 'PE';
+                        typeBadgeClass = 'badge-error';
+                    } else if (symbol.endsWith('FUT')) {
+                        instrumentType = 'FUT';
+                        typeBadgeClass = 'badge-info';
+                    }
+
                     row.innerHTML = `
                         <td><span class="badge badge-outline badge-sm">${position.account_name || 'N/A'}</span></td>
                         <td><span class="badge badge-primary badge-sm">${position.leg_number || '-'}</span></td>
                         <td>${position.symbol}</td>
                         <td><span class="badge ${riskMgmtBadgeClass} badge-sm">${riskMgmtType}</span></td>
                         <td>${position.product}</td>
+                        <td><span class="badge ${typeBadgeClass} badge-sm">${instrumentType}</span></td>
                         <td><span class="badge ${action === 'BUY' ? 'badge-success' : 'badge-error'} badge-sm">${action}</span></td>
                         <td>${Math.abs(qty)}</td>
                         <td>₹${position.average_price || 0}</td>
