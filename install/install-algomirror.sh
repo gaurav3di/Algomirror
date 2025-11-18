@@ -514,8 +514,9 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
 
     server_name $DOMAIN;
 
@@ -538,6 +539,28 @@ server {
     # Logging
     access_log /var/log/nginx/algomirror_access.log;
     error_log /var/log/nginx/algomirror_error.log;
+
+    # SSE streaming endpoints - MUST be before main location
+    location /trading/api/option-chain/stream {
+        proxy_pass http://unix:$SOCKET_FILE;
+        proxy_http_version 1.1;
+
+        # Critical for SSE streaming
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+
+        # SSE requires empty Connection header
+        proxy_set_header Connection '';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # Long timeout for persistent SSE connections
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
 
     # Main app via Unix socket
     location / {
@@ -584,8 +607,9 @@ User=www-data
 Group=www-data
 WorkingDirectory=/var/python/algomirror/app
 ExecStart=/bin/bash -c 'source /var/python/algomirror/venv/bin/activate && exec gunicorn \
-    --worker-class sync \
-    -w 4 \
+    --worker-class eventlet \
+    --timeout 0 \
+    -w 1 \
     --bind unix:/var/python/algomirror/algomirror.sock \
     --log-level info \
     --access-logfile /var/python/algomirror/logs/access.log \
