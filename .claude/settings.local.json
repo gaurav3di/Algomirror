@@ -29,7 +29,8 @@
       "Bash(Select-Object -Last 100)",
       "Bash(.venv\\Scripts\\python.exe:*)",
       "Bash(D:\\openalgo-multi\\algomirror\\.venv\\Scripts\\python.exe:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(.venvScriptsflask db migrate -m \"Add sl_hit and tp_hit fields to StrategyExecution\")"
     ],
     "deny": [],
     "ask": []

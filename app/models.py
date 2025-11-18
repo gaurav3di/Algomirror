@@ -470,6 +470,12 @@ class StrategyExecution(db.Model):
     websocket_subscribed = db.Column(db.Boolean, default=False)  # Is this position being monitored via WebSocket?
     trailing_sl_triggered = db.Column(db.Float)  # Price at which trailing SL was triggered
 
+    # Risk event capture (persists once triggered)
+    sl_hit_at = db.Column(db.DateTime)  # When SL was hit
+    sl_hit_price = db.Column(db.Float)  # Price when SL was hit
+    tp_hit_at = db.Column(db.DateTime)  # When TP was hit
+    tp_hit_price = db.Column(db.Float)  # Price when TP was hit
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

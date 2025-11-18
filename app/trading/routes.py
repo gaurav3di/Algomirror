@@ -1485,6 +1485,11 @@ def risk_status_stream():
         current_app.logger.info("[RiskMonitorSSE] Starting position monitor for real-time LTP")
         option_chain_service.start_position_monitor()
 
+    # Ensure risk manager is running for SL/TP execution
+    if not option_chain_service.risk_manager_running:
+        current_app.logger.info("[RiskMonitorSSE] Starting risk manager for SL/TP execution")
+        option_chain_service.start_risk_manager()
+
     # Capture context before entering generator (request/app context not available in generator)
     user_id = current_user.id
     app = current_app._get_current_object()
@@ -1610,6 +1615,12 @@ def risk_status_stream():
                             tp_distance = None
                             tp_hit = False
 
+                            # Check if already hit (persisted state)
+                            if execution.sl_hit_at:
+                                sl_hit = True
+                            if execution.tp_hit_at:
+                                tp_hit = True
+
                             if leg and entry_price > 0:
                                 # Stop Loss calculation
                                 if leg.stop_loss_value and leg.stop_loss_value > 0:
@@ -1620,9 +1631,20 @@ def risk_status_stream():
                                     elif leg.stop_loss_type == 'premium':
                                         sl_price = leg.stop_loss_value
 
-                                    if sl_price and last_price > 0:
+                                    if sl_price and last_price > 0 and not sl_hit:
                                         sl_distance = last_price - sl_price if action == 'BUY' else sl_price - last_price
-                                        sl_hit = last_price <= sl_price if action == 'BUY' else last_price >= sl_price
+                                        # Check if SL just got hit
+                                        if last_price <= sl_price if action == 'BUY' else last_price >= sl_price:
+                                            sl_hit = True
+                                            # Persist the hit state
+                                            execution.sl_hit_at = datetime.utcnow()
+                                            execution.sl_hit_price = last_price
+                                            db.session.commit()
+                                            # Log the SL hit event
+                                            print(f"[RISK MONITOR] STOP LOSS HIT! Symbol: {execution.symbol}, Entry: {entry_price}, SL Price: {sl_price}, Hit Price: {last_price}, Action: {action}", flush=True)
+                                    elif sl_hit:
+                                        # Already hit - show distance from hit price
+                                        sl_distance = 0
 
                                 # Take Profit calculation
                                 if leg.take_profit_value and leg.take_profit_value > 0:
@@ -1633,9 +1655,20 @@ def risk_status_stream():
                                     elif leg.take_profit_type == 'premium':
                                         tp_price = leg.take_profit_value
 
-                                    if tp_price and last_price > 0:
+                                    if tp_price and last_price > 0 and not tp_hit:
                                         tp_distance = tp_price - last_price if action == 'BUY' else last_price - tp_price
-                                        tp_hit = last_price >= tp_price if action == 'BUY' else last_price <= tp_price
+                                        # Check if TP just got hit
+                                        if last_price >= tp_price if action == 'BUY' else last_price <= tp_price:
+                                            tp_hit = True
+                                            # Persist the hit state
+                                            execution.tp_hit_at = datetime.utcnow()
+                                            execution.tp_hit_price = last_price
+                                            db.session.commit()
+                                            # Log the TP hit event
+                                            print(f"[RISK MONITOR] TAKE PROFIT HIT! Symbol: {execution.symbol}, Entry: {entry_price}, TP Price: {tp_price}, Hit Price: {last_price}, Action: {action}", flush=True)
+                                    elif tp_hit:
+                                        # Already hit - show distance from hit price
+                                        tp_distance = 0
 
                             executions_data.append({
                                 'id': execution.id,
