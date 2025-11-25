@@ -342,68 +342,59 @@ def fetch_spread_historical_data(strategy, legs, interval='5m', days=3):
             return None
 
         # Combine OHLC data from multiple legs into spread using proper formula:
-        # Spread = |SELL premiums × quantities - BUY premiums × quantities|
-        logger.info(f"Calculating spread from {len(leg_data_dict)} legs...")
+        # Combined Premium = Sum of all leg premiums (SELL as positive, BUY as negative)
+        # This represents the net premium for the spread strategy
+        logger.info(f"Calculating combined premium from {len(leg_data_dict)} legs...")
 
-        # Separate SELL and BUY legs
-        sell_dfs = []
-        buy_dfs = []
+        # Collect all leg dataframes with their signs
+        # SELL legs contribute positive premium (credit received)
+        # BUY legs contribute negative premium (debit paid)
+        all_dfs = []
+        common_index = None
 
         for leg_name, leg_info in leg_data_dict.items():
             df = leg_info['data']
             action = leg_info['action']
-            lots = leg_info['lots']  # Number of lots (not total quantity)
+            leg_number = leg_info['leg_number']
 
-            # For line chart, we only need close values (not OHLC)
-            # Multiply close price by number of lots for this leg
-            weighted_df = df[['close']].copy()
-            weighted_df['close'] = weighted_df['close'] * lots
+            # Use raw close prices (don't multiply by lots - we want per-lot spread value)
+            leg_df = df[['close']].copy()
 
-            if action == 'SELL':
-                sell_dfs.append(weighted_df)
-                logger.info(f"  SELL leg {leg_info['leg_number']} x {lots} lots added")
-            else:  # BUY
-                buy_dfs.append(weighted_df)
-                logger.info(f"  BUY leg {leg_info['leg_number']} x {lots} lots added")
-
-        # Sum all SELL legs (close values only for line chart)
-        sell_total = None
-        if sell_dfs:
-            sell_total = sell_dfs[0].copy()
-            for df in sell_dfs[1:]:
-                sell_total['close'] = sell_total['close'].add(df['close'], fill_value=0)
-            logger.info(f"  Total SELL premium calculated from {len(sell_dfs)} legs")
-
-        # Sum all BUY legs (close values only for line chart)
-        buy_total = None
-        if buy_dfs:
-            buy_total = buy_dfs[0].copy()
-            for df in buy_dfs[1:]:
-                buy_total['close'] = buy_total['close'].add(df['close'], fill_value=0)
-            logger.info(f"  Total BUY premium calculated from {len(buy_dfs)} legs")
-
-        # Calculate spread = SELL - BUY (for line chart, only close values matter)
-        if sell_total is not None and buy_total is not None:
-            # Both SELL and BUY legs exist - calculate net spread
-            spread_close = sell_total['close'] - buy_total['close']
-
-            # If spread is negative (debit spread), flip to make it positive
-            if spread_close.iloc[-1] < 0:
-                spread_close = -spread_close
-                logger.info(f"  Combined Premium = BUY - SELL (debit spread, flipped to positive)")
+            # Apply sign based on action: SELL = positive, BUY = negative
+            if action == 'BUY':
+                leg_df['close'] = -leg_df['close']
+                logger.info(f"  Leg {leg_number}: BUY (negative contribution)")
             else:
-                logger.info(f"  Combined Premium = SELL - BUY (credit spread, already positive)")
-        elif sell_total is not None:
-            # Only SELL legs - use SELL total as spread
-            spread_close = sell_total['close']
-            logger.info(f"  Combined Premium = SELL total (credit spread)")
-        elif buy_total is not None:
-            # Only BUY legs - use BUY total as spread
-            spread_close = buy_total['close']
-            logger.info(f"  Combined Premium = BUY total (debit spread)")
-        else:
-            logger.error("No valid leg data found")
+                logger.info(f"  Leg {leg_number}: SELL (positive contribution)")
+
+            all_dfs.append(leg_df)
+
+            # Build common index (intersection of all timestamps)
+            if common_index is None:
+                common_index = df.index
+            else:
+                common_index = common_index.intersection(df.index)
+
+        if not all_dfs or common_index is None or len(common_index) == 0:
+            logger.error("No valid leg data found or no common timestamps")
             return None
+
+        # Align all dataframes to common index and sum
+        logger.info(f"  Aligning {len(all_dfs)} legs to {len(common_index)} common timestamps")
+
+        # Reindex all dataframes to common index and sum
+        spread_close = None
+        for leg_df in all_dfs:
+            aligned_df = leg_df.reindex(common_index)
+            if spread_close is None:
+                spread_close = aligned_df['close'].copy()
+            else:
+                spread_close = spread_close.add(aligned_df['close'], fill_value=0)
+
+        # Combined Premium = SELL premiums - BUY premiums
+        # Positive value = net credit (receiving premium)
+        # Negative value = net debit (paying premium)
+        logger.info(f"  Combined Premium calculated: SELL - BUY (net credit/debit)")
 
         # Create OHLC DataFrame from close values for compatibility (line chart uses close only)
         combined_df = pd.DataFrame({

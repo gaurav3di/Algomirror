@@ -670,6 +670,34 @@
                                 </a>
                             </div>
                         </div>
+
+                        <!-- Combined Premium (for Supertrend strategies) -->
+                        <div class="bg-base-100 rounded-lg p-3">
+                            <div class="flex justify-between text-sm mb-2">
+                                <span class="flex items-center gap-1">
+                                    <svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                                    </svg>
+                                    Combined Premium
+                                </span>
+                                <span class="badge badge-sm" id="riskPremiumConnection">
+                                    <span class="loading loading-spinner loading-xs"></span>
+                                </span>
+                            </div>
+                            <div class="text-center my-2">
+                                <span class="font-mono font-bold text-2xl" id="riskCombinedPremium">--</span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2 text-xs">
+                                <div>
+                                    <span class="text-base-content/60">Supertrend:</span>
+                                    <span class="font-mono ml-1" id="riskSupertrendValue">--</span>
+                                </div>
+                                <div>
+                                    <span class="text-base-content/60">Signal:</span>
+                                    <span class="badge badge-sm ml-1" id="riskSupertrendSignal">--</span>
+                                </div>
+                            </div>
+                        </div>
                         {% endif %}
                     </div>
 
@@ -2297,6 +2325,100 @@ if (strategyIdForRisk && document.getElementById('riskStatusSection')) {
         if (riskEventSource) {
             riskEventSource.close();
         }
+        if (combinedPremiumInterval) {
+            clearInterval(combinedPremiumInterval);
+        }
+    });
+}
+
+// Combined Premium polling for Supertrend strategies
+let combinedPremiumInterval = null;
+const supertrendEnabled = {{ 'true' if strategy and strategy.supertrend_exit_enabled else 'false' }};
+
+function startCombinedPremiumPolling() {
+    if (!supertrendEnabled || !strategyIdForRisk) {
+        return;
+    }
+
+    // Initial fetch
+    fetchCombinedPremium();
+
+    // Poll every 10 seconds
+    combinedPremiumInterval = setInterval(fetchCombinedPremium, 10000);
+}
+
+async function fetchCombinedPremium() {
+    const connectionEl = document.getElementById('riskPremiumConnection');
+    const premiumEl = document.getElementById('riskCombinedPremium');
+    const supertrendValueEl = document.getElementById('riskSupertrendValue');
+    const signalEl = document.getElementById('riskSupertrendSignal');
+
+    if (!premiumEl) return;
+
+    try {
+        // Fetch chart data with strategy's supertrend parameters
+        const period = {{ strategy.supertrend_period if strategy and strategy.supertrend_period else 7 }};
+        const multiplier = {{ strategy.supertrend_multiplier if strategy and strategy.supertrend_multiplier else 3.0 }};
+        const interval = '{{ strategy.supertrend_timeframe if strategy and strategy.supertrend_timeframe else "5m" }}';
+
+        const response = await fetch(
+            `/tradingview/api/chart-data/${strategyIdForRisk}?period=${period}&multiplier=${multiplier}&interval=${interval}&days=1&_=${Date.now()}`
+        );
+        const result = await response.json();
+
+        if (result.status === 'success' && result.data && result.data.length > 0) {
+            // Get the latest data point
+            const latestData = result.data[result.data.length - 1];
+            const combinedPremium = latestData.close;
+            const supertrendValue = latestData.supertrend;
+            const direction = latestData.direction; // 1 = bullish (BUY), -1 = bearish (SELL)
+
+            // Update connection status
+            if (connectionEl) {
+                connectionEl.innerHTML = '<span class="relative flex h-2 w-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-success"></span></span>';
+                connectionEl.className = 'badge badge-sm badge-success';
+            }
+
+            // Update combined premium
+            premiumEl.textContent = combinedPremium !== null ? combinedPremium.toFixed(2) : '--';
+
+            // Update supertrend value
+            if (supertrendValueEl) {
+                supertrendValueEl.textContent = supertrendValue !== null ? supertrendValue.toFixed(2) : '--';
+            }
+
+            // Update signal
+            if (signalEl) {
+                if (direction === 1) {
+                    signalEl.textContent = 'BUY';
+                    signalEl.className = 'badge badge-success badge-sm ml-1';
+                } else if (direction === -1) {
+                    signalEl.textContent = 'SELL';
+                    signalEl.className = 'badge badge-error badge-sm ml-1';
+                } else {
+                    signalEl.textContent = '--';
+                    signalEl.className = 'badge badge-sm ml-1';
+                }
+            }
+        } else {
+            throw new Error('No data received');
+        }
+    } catch (error) {
+        console.error('Error fetching combined premium:', error);
+
+        // Update connection status to offline
+        if (connectionEl) {
+            connectionEl.innerHTML = 'Offline';
+            connectionEl.className = 'badge badge-sm badge-error';
+        }
+    }
+}
+
+// Start combined premium polling when page loads (if supertrend is enabled)
+if (supertrendEnabled && strategyIdForRisk) {
+    document.addEventListener('DOMContentLoaded', function() {
+        // Delay slightly to let other initializations complete
+        setTimeout(startCombinedPremiumPolling, 1000);
     });
 }
 
