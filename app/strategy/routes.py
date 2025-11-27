@@ -2,7 +2,7 @@ from flask import render_template, request, jsonify, flash, redirect, url_for
 from flask_login import login_required, current_user
 from app import db
 from app.strategy import strategy_bp
-from app.models import Strategy, StrategyLeg, StrategyExecution, TradingAccount
+from app.models import Strategy, StrategyLeg, StrategyExecution, TradingAccount, TradeQuality
 from app.utils.rate_limiter import api_rate_limit, heavy_rate_limit
 from app.utils.strategy_executor import StrategyExecutor
 from datetime import datetime, timedelta
@@ -286,10 +286,22 @@ def builder(strategy_id=None):
     if strategy and hasattr(strategy, 'legs_list'):
         legs_data = strategy.legs_list
 
+    # Get trade quality settings for dynamic risk profile percentages
+    trade_qualities = TradeQuality.query.filter_by(user_id=current_user.id).all()
+    quality_map = {q.quality_grade: q.margin_percentage for q in trade_qualities}
+
+    # Default values if not set
+    quality_percentages = {
+        'A': quality_map.get('A', 80),  # Aggressive
+        'B': quality_map.get('B', 65),  # Balanced
+        'C': quality_map.get('C', 40)   # Conservative
+    }
+
     return render_template('strategy/builder.html',
                          strategy=strategy,
                          strategy_legs=legs_data,
-                         accounts=accounts)
+                         accounts=accounts,
+                         quality_percentages=quality_percentages)
 
 @strategy_bp.route('/execute/<int:strategy_id>', methods=['POST'])
 @login_required
