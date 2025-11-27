@@ -276,8 +276,17 @@ def create_app(config_name=None):
                     app.logger.info(f"Ping response: {ping_response}")
 
                     if ping_response.get('status') == 'success':
-                        app.logger.info(f"Authentication successful, starting option chains")
-                        option_chain_service.on_primary_account_connected(primary)
+                        app.logger.info(f"Authentication successful, starting option chains in background")
+                        # Start option chains in a background thread to avoid blocking worker startup
+                        import threading
+                        def delayed_start():
+                            import time
+                            time.sleep(2)  # Wait for app to fully initialize
+                            try:
+                                option_chain_service.on_primary_account_connected(primary)
+                            except Exception as e:
+                                app.logger.error(f"Error starting option chains: {e}")
+                        threading.Thread(target=delayed_start, daemon=True).start()
                     else:
                         # Authentication failed - update connection status
                         app.logger.warning(f"Primary account {primary.account_name} authentication failed: {ping_response.get('message', 'Unknown error')}")
