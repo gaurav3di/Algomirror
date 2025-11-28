@@ -42,19 +42,17 @@ class StrategyExecutor:
         self.account_margins = {}  # Track available margin per account
         self.pre_calculated_quantities = {}  # Store pre-calculated quantities for straddles/strangles
 
-        # Map strategy risk_profile to margin percentage
-        # Fixed lots doesn't use margin calculator, so these only apply to margin-based profiles
-        self.risk_profile_margins = {
-            'conservative': 0.40,  # Use 40% of available margin
-            'balanced': 0.65,      # Use 65% of available margin
-            'aggressive': 0.80     # Use 80% of available margin
+        # Map strategy risk_profile to quality grade for database lookup
+        # Aggressive -> Grade A, Balanced -> Grade B, Conservative -> Grade C
+        self.risk_profile_to_grade = {
+            'aggressive': 'A',
+            'balanced': 'B',
+            'conservative': 'C'
         }
 
-        # Get margin percentage from risk profile
-        self.margin_percentage = self.risk_profile_margins.get(
-            strategy.risk_profile,
-            0.65  # Default to 65% if risk_profile is not set or is 'fixed_lots'
-        )
+        # Get margin percentage from TradeQuality table in database
+        # This ensures consistency with the Margin Calculator page
+        self.margin_percentage = self._get_margin_percentage_from_db(strategy)
 
         # Determine is_expiry based on market_condition setting
         # 'expiry' -> True (use expiry margins)
@@ -78,6 +76,61 @@ class StrategyExecutor:
             from app.utils.margin_calculator import MarginCalculator
             self.margin_calculator = MarginCalculator(strategy.user_id)
             logger.info(f"Strategy {strategy.id} ({strategy.name}): Using {self.margin_percentage*100}% margin based on risk_profile '{strategy.risk_profile}'")
+
+    def _get_margin_percentage_from_db(self, strategy: Strategy) -> float:
+        """
+        Fetch margin percentage from TradeQuality table in database.
+        This ensures consistency with the Margin Calculator page.
+
+        Mapping:
+        - aggressive -> Grade A
+        - balanced -> Grade B
+        - conservative -> Grade C
+        """
+        from app.models import TradeQuality
+
+        # Default fallback percentages (only used if DB lookup fails)
+        fallback_percentages = {
+            'aggressive': 0.80,
+            'balanced': 0.65,
+            'conservative': 0.40
+        }
+
+        risk_profile = strategy.risk_profile
+
+        # If fixed_lots or not set, return default
+        if not risk_profile or risk_profile == 'fixed_lots':
+            return 0.65  # Default 65%
+
+        # Get quality grade from risk profile
+        quality_grade = self.risk_profile_to_grade.get(risk_profile)
+
+        if not quality_grade:
+            logger.warning(f"Unknown risk_profile '{risk_profile}', using default 65%")
+            return 0.65
+
+        try:
+            # Fetch from TradeQuality table
+            trade_quality = TradeQuality.query.filter_by(
+                user_id=strategy.user_id,
+                quality_grade=quality_grade,
+                is_active=True
+            ).first()
+
+            if trade_quality and trade_quality.margin_percentage:
+                margin_pct = trade_quality.margin_percentage / 100  # Convert from 50 to 0.50
+                logger.info(f"Loaded margin percentage from DB: Grade {quality_grade} = {trade_quality.margin_percentage}%")
+                return margin_pct
+            else:
+                # Fallback if not found in DB
+                fallback = fallback_percentages.get(risk_profile, 0.65)
+                logger.warning(f"TradeQuality not found for Grade {quality_grade}, using fallback {fallback*100}%")
+                return fallback
+
+        except Exception as e:
+            logger.error(f"Error fetching TradeQuality from DB: {e}")
+            fallback = fallback_percentages.get(risk_profile, 0.65)
+            return fallback
 
     def _get_active_accounts(self) -> List[TradingAccount]:
         """Get active trading accounts for strategy"""
