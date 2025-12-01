@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore', message='nopython is set for njit and is ignor
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
 from flask_migrate import Migrate
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, CSRFError
 from flask_cors import CORS
 from flask_talisman import Talisman
 from flask_session import Session
@@ -209,6 +209,17 @@ def create_app(config_name=None):
         """Make registration_available variable available to all templates"""
         from app.models import User
         return dict(registration_available=(User.query.count() == 0))
+
+    # CSRF error handler - redirects to login with message when session expires
+    @app.errorhandler(CSRFError)
+    def handle_csrf_error(e):
+        from flask import flash, redirect, url_for, request
+        app.logger.warning(f'CSRF error on {request.path}: {e.description}')
+        flash('Your session has expired. Please try again.', 'warning')
+        # Redirect to login page for auth routes, otherwise to referrer or home
+        if request.path.startswith('/auth'):
+            return redirect(url_for('auth.login'))
+        return redirect(request.referrer or url_for('main.index'))
 
     # Create database tables
     with app.app_context():

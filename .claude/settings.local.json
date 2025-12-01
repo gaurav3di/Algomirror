@@ -11,7 +11,14 @@
       "Bash(timeout 10 uv run:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cd:*)",
+      "Bash(.venvScriptspython.exe -c \"import numpy as np; import talib; np.random.seed(42); n=50; close=np.cumsum(np.random.randn(n))+100; high=close+np.abs(np.random.randn(n)); low=close-np.abs(np.random.randn(n)); atr=talib.ATR(high,low,close,7); print(''ATR first 10:'', atr[:10]); print(''First valid ATR idx:'', np.where(~np.isnan(atr))[0][0] if np.any(~np.isnan(atr)) else ''None''); from app.utils.supertrend import calculate_supertrend; trend,direction,long,short=calculate_supertrend(high,low,close,7,3); print(''Trend first 15:'', trend[:15]); print(''Dir first 15:'', direction[:15]); print(''Non-NaN count:'', np.sum(~np.isnan(trend)))\")",
+      "Bash(\".venv\\Scripts\\python.exe\" test_supertrend.py)",
+      "Bash(del test_supertrend.py)",
+      "Bash(git -C:*)",
+      "Bash(git -C \"D:\\openalgo-multi\\algomirror\" commit -m \"$(cat <<''EOF''\nFix Supertrend NaN handling for proper calculation\n\n- Added first valid index detection (skip ATR warmup period)\n- Initialize first valid bar with direction=1 (bearish) per Pine Script\n- Handle NaN comparisons by checking previous bar validity\n- Fixed band adjustment to only apply when previous values are valid\n- Supertrend now correctly calculates after ATR period warmup\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(.venvScriptspython.exe -c \"from app import create_app; print(''OK'')\")"
     ],
     "deny": [],
     "ask": []
