@@ -677,70 +677,93 @@ class StrategyExecutor:
                     # Sort expiries to ensure they're in chronological order
                     # Convert expiry strings to dates for sorting
                     def parse_expiry(exp_str):
-                        """Parse expiry string like '10-JUL-25' to date"""
-                        try:
-                            return dt.strptime(exp_str, '%d-%b-%y')
-                        except:
+                        """Parse expiry string like '10-JUL-25' or '10JUL25' to date"""
+                        if not exp_str:
+                            return dt.max
+                        # Normalize to uppercase for consistent parsing
+                        exp_upper = exp_str.upper().strip()
+                        formats = ['%d-%b-%y', '%d%b%y', '%d-%B-%y', '%d%B%y', '%d-%b-%Y', '%d%b%Y']
+                        for fmt in formats:
                             try:
-                                return dt.strptime(exp_str, '%d%b%y')
-                            except:
-                                return dt.max
+                                return dt.strptime(exp_upper, fmt)
+                            except ValueError:
+                                continue
+                        logger.warning(f"Could not parse expiry date: {exp_str}")
+                        return dt.max
 
                     sorted_expiries = sorted(expiries, key=parse_expiry)
+                    logger.info(f"[EXPIRY] {leg.instrument} {leg.product_type}: Available expiries: {sorted_expiries}")
 
                     # Select appropriate expiry based on leg configuration
                     selected_expiry = None
+                    logger.info(f"[EXPIRY] Selecting expiry for {leg.instrument} {leg.product_type}, expiry_type={leg.expiry}")
 
                     if leg.expiry == 'current_week':
                         # First expiry in the list (nearest)
+                        # For futures: this is the current month contract
                         selected_expiry = sorted_expiries[0] if sorted_expiries else None
+                        logger.info(f"[EXPIRY] current_week: selected {selected_expiry}")
 
                     elif leg.expiry == 'next_week':
                         # Second expiry if available, else first
+                        # For futures: this is the next month contract
                         if len(sorted_expiries) > 1:
                             selected_expiry = sorted_expiries[1]
                         else:
                             selected_expiry = sorted_expiries[0] if sorted_expiries else None
+                        logger.info(f"[EXPIRY] next_week: selected {selected_expiry}")
 
                     elif leg.expiry == 'current_month':
-                        # Find the monthly expiry (usually last Thursday of month)
-                        # For indices, monthly expiry is typically the last expiry of the month
+                        # Find the monthly expiry for current month
+                        # For futures: typically only one expiry per month
+                        # For options: get the last (monthly) expiry of current month
                         current_month = dt.now().month
                         current_year = dt.now().year
+                        logger.info(f"[EXPIRY] Looking for current_month: month={current_month}, year={current_year}")
 
                         for exp_str in sorted_expiries:
                             exp_date = parse_expiry(exp_str)
                             if exp_date.month == current_month and exp_date.year == current_year:
                                 # Keep updating to get the last expiry of current month
                                 selected_expiry = exp_str
+                                logger.debug(f"[EXPIRY] Found current_month candidate: {exp_str}")
 
-                        # If no current month expiry found, use the first available
+                        # If no current month expiry found (month already passed), use the first available
                         if not selected_expiry and sorted_expiries:
                             selected_expiry = sorted_expiries[0]
+                            logger.info(f"[EXPIRY] No current_month expiry, using first available: {selected_expiry}")
 
                     elif leg.expiry == 'next_month':
-                        # Find next month's monthly expiry (last expiry of next month)
-                        next_month = (dt.now().month % 12) + 1
-                        next_year = dt.now().year if next_month > dt.now().month else dt.now().year + 1
+                        # Find next month's monthly expiry
+                        # For futures: this is typically the second contract in the series
+                        current_month = dt.now().month
+                        current_year = dt.now().year
+                        next_month = (current_month % 12) + 1
+                        next_year = current_year + 1 if next_month == 1 else current_year
+                        logger.info(f"[EXPIRY] Looking for next_month: month={next_month}, year={next_year}")
 
                         for exp_str in sorted_expiries:
                             exp_date = parse_expiry(exp_str)
                             if exp_date.month == next_month and exp_date.year == next_year:
                                 # Keep updating to get the last expiry of next month (monthly expiry)
                                 selected_expiry = exp_str
+                                logger.debug(f"[EXPIRY] Found next_month candidate: {exp_str}")
 
-                        # If no next month expiry found, use the first expiry after current month
+                        # If no next month expiry found, find first expiry that's in a future month
                         if not selected_expiry:
-                            current_date = dt.now()
+                            logger.warning(f"[EXPIRY] No exact next_month match, looking for next available month")
                             for exp_str in sorted_expiries:
                                 exp_date = parse_expiry(exp_str)
-                                if exp_date > current_date:
+                                # Skip current month expiries, get the next month's
+                                if exp_date.year > current_year or (exp_date.year == current_year and exp_date.month > current_month):
                                     selected_expiry = exp_str
+                                    logger.info(f"[EXPIRY] Using next available month expiry: {selected_expiry}")
                                     break
 
                     if selected_expiry:
                         # Convert to OpenAlgo format (e.g., '10-JUL-25' to '10JUL25')
-                        formatted_expiry = selected_expiry.replace('-', '')
+                        # Ensure uppercase for consistency (e.g., '10JUL25' not '10jul25')
+                        formatted_expiry = selected_expiry.replace('-', '').upper()
 
                         # Cache the result
                         self.expiry_cache[cache_key] = {
@@ -748,10 +771,10 @@ class StrategyExecutor:
                             'timestamp': dt.utcnow()
                         }
 
-                        logger.info(f"{leg.instrument} {leg.expiry} mapped to expiry: {formatted_expiry}")
+                        logger.info(f"[EXPIRY] {leg.instrument} {leg.expiry} -> {selected_expiry} -> {formatted_expiry}")
                         return formatted_expiry
                     else:
-                        logger.error(f"Could not determine expiry for {leg.instrument} {leg.expiry}")
+                        logger.error(f"[EXPIRY] Could not determine expiry for {leg.instrument} {leg.expiry}. Available: {sorted_expiries}")
                         return ""
 
                 else:
