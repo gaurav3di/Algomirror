@@ -29,7 +29,10 @@
       "Bash(.venvScriptsflask.exe db migrate -m \"Add next_month_lot_size to TradingSettings\")",
       "Bash(.venv/Scripts/flask.exe db migrate -m \"Add next_month_lot_size to TradingSettings\")",
       "Bash(.venv/Scripts/flask.exe db init)",
-      "Bash(.venvScriptspython.exe migratemigrate_all.py)"
+      "Bash(.venvScriptspython.exe migratemigrate_all.py)",
+      "mcp__ide__getDiagnostics",
+      "Bash(.venvScriptspython.exe -m py_compile apputilssupertrend_exit_service.py)",
+      "Bash(D:openalgo-multialgomirror.venvScriptspython.exe -m py_compile:*)"
     ],
     "deny": [],
     "ask": []

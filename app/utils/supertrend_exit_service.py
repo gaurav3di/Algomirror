@@ -185,8 +185,14 @@ class SupertrendExitService:
                     logger.info(f"Strategy {strategy.id} has no open positions, skipping")
                     return
 
-                # Fetch combined spread data
-                spread_data = self.fetch_combined_spread_data(strategy)
+                # Get set of leg IDs that have open positions
+                # A leg is considered "open" if ANY account has an open position for it
+                open_leg_ids = set(pos.leg_id for pos in open_positions if pos.leg_id)
+                logger.info(f"Strategy {strategy.id}: {len(open_positions)} open positions across {len(open_leg_ids)} legs (leg_ids: {open_leg_ids})")
+
+                # Fetch combined spread data ONLY for legs with open positions
+                # This ensures closed legs don't affect the Supertrend calculation
+                spread_data = self.fetch_combined_spread_data(strategy, open_leg_ids=open_leg_ids)
 
                 if spread_data is None or len(spread_data) < strategy.supertrend_period + 5:
                     logger.warning(f"Insufficient data for Supertrend calculation for strategy {strategy.id}")
@@ -243,10 +249,16 @@ class SupertrendExitService:
             except Exception as e:
                 logger.error(f"Error checking Supertrend exit for strategy {strategy.id}: {e}", exc_info=True)
 
-    def fetch_combined_spread_data(self, strategy: Strategy) -> pd.DataFrame:
+    def fetch_combined_spread_data(self, strategy: Strategy, open_leg_ids: set = None) -> pd.DataFrame:
         """
         Fetch real-time combined spread data for strategy legs
         Similar to tradingview routes but optimized for exit monitoring
+
+        Args:
+            strategy: Strategy object
+            open_leg_ids: Optional set of leg IDs that have open positions.
+                         If provided, only these legs will be included in the spread calculation.
+                         This ensures closed legs don't affect the Supertrend calculation.
         """
         try:
             from app.models import StrategyLeg, StrategyExecution
@@ -257,6 +269,21 @@ class SupertrendExitService:
             if not legs:
                 logger.error(f"Strategy {strategy.id} has no legs")
                 return None
+
+            # Filter to only include legs with open positions
+            # This is crucial for correct Supertrend calculation when some legs are closed
+            if open_leg_ids is not None:
+                original_leg_count = len(legs)
+                legs = [leg for leg in legs if leg.id in open_leg_ids]
+
+                if len(legs) < original_leg_count:
+                    closed_count = original_leg_count - len(legs)
+                    logger.info(f"Strategy {strategy.id}: Filtered from {original_leg_count} to {len(legs)} legs "
+                               f"({closed_count} leg(s) closed, excluded from spread calculation)")
+
+                if not legs:
+                    logger.warning(f"Strategy {strategy.id}: No legs with open positions after filtering")
+                    return None
 
             # Get a trading account
             account_ids = strategy.selected_accounts or []
@@ -284,12 +311,25 @@ class SupertrendExitService:
                 host=account.host_url
             )
 
-            # Get actual placed symbols from executions
-            executions = StrategyExecution.query.filter_by(
-                strategy_id=strategy.id
-            ).filter(
-                StrategyExecution.symbol.isnot(None)
-            ).all()
+            # Get actual placed symbols from OPEN executions only
+            # This ensures we use symbols from positions that are still active
+            if open_leg_ids is not None:
+                # Filter to only open positions for the relevant legs
+                executions = StrategyExecution.query.filter_by(
+                    strategy_id=strategy.id,
+                    status='entered'
+                ).filter(
+                    StrategyExecution.symbol.isnot(None),
+                    StrategyExecution.leg_id.in_(open_leg_ids)
+                ).all()
+                logger.debug(f"Strategy {strategy.id}: Found {len(executions)} open executions for symbol mapping")
+            else:
+                # Fallback to existing behavior (get all executions)
+                executions = StrategyExecution.query.filter_by(
+                    strategy_id=strategy.id
+                ).filter(
+                    StrategyExecution.symbol.isnot(None)
+                ).all()
 
             # Map leg_id to actual symbol (lot size comes from leg.lots)
             leg_symbols = {}
