@@ -58,8 +58,8 @@
                     <div class="stat-value text-lg">
                         <select id="intervalSelect" class="select select-bordered select-sm">
                             <option value="3m" {% if strategy.supertrend_timeframe == '3m' %}selected{% endif %}>3 Min</option>
-                            <option value="5m" {% if not strategy.supertrend_timeframe or strategy.supertrend_timeframe == '5m' %}selected{% endif %}>5 Min</option>
-                            <option value="10m" {% if strategy.supertrend_timeframe == '10m' %}selected{% endif %}>10 Min</option>
+                            <option value="5m" {% if strategy.supertrend_timeframe == '5m' %}selected{% endif %}>5 Min</option>
+                            <option value="10m" {% if not strategy.supertrend_timeframe or strategy.supertrend_timeframe == '10m' %}selected{% endif %}>10 Min</option>
                             <option value="15m" {% if strategy.supertrend_timeframe == '15m' %}selected{% endif %}>15 Min</option>
                         </select>
                     </div>
@@ -83,8 +83,8 @@
                     <div class="stat-value text-lg">
                         <select id="periodSelect" class="select select-bordered select-sm">
                             <option value="5" {% if strategy.supertrend_period == 5 %}selected{% endif %}>5</option>
-                            <option value="7" {% if not strategy.supertrend_period or strategy.supertrend_period == 7 %}selected{% endif %}>7</option>
-                            <option value="10" {% if strategy.supertrend_period == 10 %}selected{% endif %}>10</option>
+                            <option value="7" {% if strategy.supertrend_period == 7 %}selected{% endif %}>7</option>
+                            <option value="10" {% if not strategy.supertrend_period or strategy.supertrend_period == 10 %}selected{% endif %}>10</option>
                             <option value="14" {% if strategy.supertrend_period == 14 %}selected{% endif %}>14</option>
                         </select>
                     </div>
