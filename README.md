@@ -8,7 +8,7 @@
 
 > **Enterprise-grade multi-account management platform for OpenAlgo with strategy building, risk management, and real-time analytics**
 
-AlgoMirror is a proprietary, secure, and scalable multi-account management platform developed by **OpenFlare Technologies**. It provides traders with a unified interface to manage multiple OpenAlgo trading accounts across 22+ brokers, featuring advanced strategy building, Supertrend-based exits, dynamic margin calculation, and comprehensive risk management.
+AlgoMirror is a proprietary, secure, and scalable multi-account management platform developed by **OpenFlare Technologies**. It provides traders with a unified interface to manage multiple OpenAlgo trading accounts across 24 brokers, featuring advanced strategy building, Supertrend-based exits, dynamic margin calculation, and comprehensive risk management.
 
 ---
 
@@ -34,7 +34,7 @@ AlgoMirror is a proprietary, secure, and scalable multi-account management platf
 ## Key Features
 
 ### Multi-Account Management
-- Unified dashboard for unlimited trading accounts across 22+ brokers
+- Unified dashboard for unlimited trading accounts across 24 brokers
 - Primary/secondary account hierarchy with automatic failover
 - Real-time synchronization and live updates across all accounts
 - Cross-broker support with seamless switching
@@ -401,13 +401,14 @@ The Supertrend Exit Service runs as a daemon thread:
 
 ## OpenAlgo Integration
 
-### Supported Brokers (22+)
+### Supported Brokers (24)
 
 - 5paisa & 5paisa (XTS)
 - Aliceblue
 - AngelOne
 - Compositedge (XTS)
-- Dhan & Dhan (Sandbox)
+- Definedge
+- Dhan
 - Firstock
 - Flattrade
 - Fyers
@@ -416,9 +417,11 @@ The Supertrend Exit Service runs as a daemon thread:
 - IndiaBulls
 - IndMoney
 - Kotak Securities
+- Motilal Oswal
 - Paytm
 - Pocketful
 - Shoonya
+- Tradejini
 - Upstox
 - Wisdom Capital (XTS)
 - Zebu
@@ -723,7 +726,7 @@ flask db upgrade
 - Risk event audit logging
 
 ### v1.0.0
-- Multi-account OpenAlgo integration (22+ brokers)
+- Multi-account OpenAlgo integration (24 brokers)
 - Zero-trust security architecture
 - Fernet encryption for API keys
 - Multi-tier rate limiting

@@ -15,8 +15,8 @@ class AddAccountForm(FlaskForm):
         ('Aliceblue', 'Aliceblue'),
         ('AngelOne', 'AngelOne'),
         ('Compositedge (XTS)', 'Compositedge (XTS)'),
+        ('Definedge', 'Definedge'),
         ('Dhan', 'Dhan'),
-        ('Dhan(Sandbox)', 'Dhan(Sandbox)'),
         ('Firstock', 'Firstock'),
         ('Flattrade', 'Flattrade'),
         ('Fyers', 'Fyers'),
@@ -25,15 +25,17 @@ class AddAccountForm(FlaskForm):
         ('IndiaBulls', 'IndiaBulls'),
         ('IndMoney', 'IndMoney'),
         ('Kotak Securities', 'Kotak Securities'),
+        ('Motilal Oswal', 'Motilal Oswal'),
         ('Paytm', 'Paytm'),
         ('Pocketful', 'Pocketful'),
         ('Shoonya', 'Shoonya'),
+        ('Tradejini', 'Tradejini'),
         ('Upstox', 'Upstox'),
         ('Wisdom Capital (XTS)', 'Wisdom Capital (XTS)'),
         ('Zebu', 'Zebu'),
         ('Zerodha', 'Zerodha')
     ], validators=[DataRequired()])
-    
+
     host_url = StringField('OpenAlgo Host URL', validators=[
         DataRequired(),
         URL(message='Please enter a valid URL.')
@@ -72,8 +74,8 @@ class EditAccountForm(FlaskForm):
         ('Aliceblue', 'Aliceblue'),
         ('AngelOne', 'AngelOne'),
         ('Compositedge (XTS)', 'Compositedge (XTS)'),
+        ('Definedge', 'Definedge'),
         ('Dhan', 'Dhan'),
-        ('Dhan(Sandbox)', 'Dhan(Sandbox)'),
         ('Firstock', 'Firstock'),
         ('Flattrade', 'Flattrade'),
         ('Fyers', 'Fyers'),
@@ -82,15 +84,17 @@ class EditAccountForm(FlaskForm):
         ('IndiaBulls', 'IndiaBulls'),
         ('IndMoney', 'IndMoney'),
         ('Kotak Securities', 'Kotak Securities'),
+        ('Motilal Oswal', 'Motilal Oswal'),
         ('Paytm', 'Paytm'),
         ('Pocketful', 'Pocketful'),
         ('Shoonya', 'Shoonya'),
+        ('Tradejini', 'Tradejini'),
         ('Upstox', 'Upstox'),
         ('Wisdom Capital (XTS)', 'Wisdom Capital (XTS)'),
         ('Zebu', 'Zebu'),
         ('Zerodha', 'Zerodha')
     ], validators=[DataRequired()])
-    
+
     host_url = StringField('OpenAlgo Host URL', validators=[
         DataRequired(),
         URL(message='Please enter a valid URL.')

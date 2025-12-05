@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AlgoMirror is a **proprietary** enterprise-grade multi-account management platform for OpenAlgo developed by OpenFlare Technologies. It enables users to manage multiple OpenAlgo trading accounts from different brokers (22+ supported) through a unified interface with enterprise-grade security, real-time analytics, and comprehensive audit logging.
+AlgoMirror is a **proprietary** enterprise-grade multi-account management platform for OpenAlgo developed by OpenFlare Technologies. It enables users to manage multiple OpenAlgo trading accounts from different brokers (24 supported) through a unified interface with enterprise-grade security, real-time analytics, and comprehensive audit logging.
 
 ## Key Commands
 
@@ -192,8 +192,8 @@ The platform integrates with OpenAlgo through:
 - **Extended OpenAlgo Client**: Custom `ExtendedOpenAlgoAPI` class in `app/utils/openalgo_client.py`
 - **Ping API Support**: Built-in connection testing using `/api/v1/ping` endpoint
 
-#### Supported Brokers (22+)
-5paisa, 5paisa (XTS), Aliceblue, AngelOne, Compositedge (XTS), Dhan, Dhan(Sandbox), Firstock, Flattrade, Fyers, Groww, IIFL (XTS), IndiaBulls, IndMoney, Kotak Securities, Paytm, Pocketful, Shoonya, Upstox, Wisdom Capital (XTS), Zebu, Zerodha
+#### Supported Brokers (24)
+5paisa, 5paisa (XTS), Aliceblue, AngelOne, Compositedge (XTS), Definedge, Dhan, Firstock, Flattrade, Fyers, Groww, IIFL (XTS), IndiaBulls, IndMoney, Kotak Securities, Motilal Oswal, Paytm, Pocketful, Shoonya, Tradejini, Upstox, Wisdom Capital (XTS), Zebu, Zerodha
 
 ### Theme System
 Implements exact OpenAlgo theme using DaisyUI + Tailwind CSS:
@@ -246,7 +246,7 @@ Structured JSON logging (`app/__init__.py`):
     - `layout.html`: Extends base.html, provides authenticated/non-authenticated layouts
     - All other templates: Extend `layout.html` for consistent UI
 
-11. **Broker Selection**: Account forms use dropdown with all 22+ supported brokers. Broker name is auto-detected from ping API response.
+11. **Broker Selection**: Account forms use dropdown with all 24 supported brokers. Broker name is auto-detected from ping API response.
 
 12. **Error Handling**: Comprehensive error handling with specific messages for connection issues, invalid API keys, and server problems.
 
