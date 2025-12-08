@@ -337,9 +337,9 @@ class OrderStatusPoller:
 
             from app.models import StrategyExecution, TradingAccount
 
-            # Find all pending orders that need tracking
+            # Find all pending orders that need tracking (both entry and exit pending)
             pending_executions = StrategyExecution.query.filter(
-                StrategyExecution.status == 'pending',
+                StrategyExecution.status.in_(['pending', 'exit_pending']),
                 StrategyExecution.order_id.isnot(None)
             ).all()
 
@@ -358,6 +358,16 @@ class OrderStatusPoller:
                 # Get strategy name
                 strategy_name = execution.strategy.name if execution.strategy else 'Unknown'
 
+                # Use correct order_id based on status
+                # For exit_pending, use exit_order_id; for pending (entry), use order_id
+                if execution.status == 'exit_pending':
+                    order_id_to_poll = execution.exit_order_id
+                    if not order_id_to_poll:
+                        logger.warning(f"[RECOVERY] Skipping exit_pending execution {execution.id}: no exit_order_id")
+                        continue
+                else:
+                    order_id_to_poll = execution.order_id
+
                 # Add to polling queue
                 with self._lock:
                     self.pending_orders[execution.id] = {
@@ -365,12 +375,13 @@ class OrderStatusPoller:
                         'account_name': account.account_name,
                         'api_key': account.get_api_key(),
                         'host_url': account.host_url,
-                        'order_id': execution.order_id,
+                        'order_id': order_id_to_poll,
                         'strategy_name': strategy_name,
                         'added_time': datetime.utcnow(),  # Reset timer for recovered orders
                         'check_count': 0
                     }
                     recovered_count += 1
+                    logger.info(f"[RECOVERY] Recovered {execution.status} order {order_id_to_poll} for execution {execution.id}")
 
             if recovered_count > 0:
                 logger.info(f"[RECOVERY] Recovered {recovered_count} pending orders to polling queue")
@@ -419,7 +430,16 @@ class OrderStatusPoller:
             )
 
             strategy_name = execution.strategy.name if execution.strategy else 'Unknown'
-            response = client.orderstatus(order_id=execution.order_id, strategy=strategy_name)
+
+            # Use correct order_id based on status
+            # For exit_pending, check exit_order_id; for pending (entry), check order_id
+            is_exit_order = execution.status == 'exit_pending'
+            order_id_to_check = execution.exit_order_id if is_exit_order else execution.order_id
+
+            if not order_id_to_check:
+                return {'status': 'error', 'message': f'No order_id found for status {execution.status}'}
+
+            response = client.orderstatus(order_id=order_id_to_check, strategy=strategy_name)
 
             if response.get('status') == 'success':
                 data = response.get('data', {})
@@ -432,6 +452,7 @@ class OrderStatusPoller:
                 # Update based on broker status
                 if broker_status == 'complete':
                     if execution.status == 'pending':
+                        # Entry order completed
                         execution.status = 'entered'
                         execution.broker_order_status = 'complete'
                         if avg_price and avg_price > 0:
@@ -446,7 +467,29 @@ class OrderStatusPoller:
                         with self._lock:
                             self.pending_orders.pop(execution_id, None)
 
-                        logger.info(f"[SYNC] Order {execution.order_id} synced: {old_status}->{execution.status}")
+                        logger.info(f"[SYNC] Entry order {order_id_to_check} synced: {old_status}->{execution.status}")
+
+                    elif execution.status == 'exit_pending':
+                        # Exit order completed
+                        execution.status = 'exited'
+                        execution.broker_order_status = 'complete'
+                        if avg_price and avg_price > 0:
+                            execution.exit_price = avg_price
+                            # Calculate realized P&L
+                            if execution.leg and execution.entry_price:
+                                if execution.leg.action.upper() == 'BUY':
+                                    execution.realized_pnl = (avg_price - execution.entry_price) * execution.quantity
+                                else:
+                                    execution.realized_pnl = (execution.entry_price - avg_price) * execution.quantity
+                        if not execution.exit_time:
+                            execution.exit_time = datetime.utcnow()
+                        db.session.commit()
+
+                        # Remove from polling queue if present
+                        with self._lock:
+                            self.pending_orders.pop(execution_id, None)
+
+                        logger.info(f"[SYNC] Exit order {order_id_to_check} synced: {old_status}->{execution.status}")
 
                 elif broker_status in ['rejected', 'cancelled']:
                     execution.status = 'failed'
@@ -457,7 +500,7 @@ class OrderStatusPoller:
                     with self._lock:
                         self.pending_orders.pop(execution_id, None)
 
-                    logger.info(f"[SYNC] Order {execution.order_id} synced: {old_status}->{execution.status} ({broker_status})")
+                    logger.info(f"[SYNC] Order {order_id_to_check} synced: {old_status}->{execution.status} ({broker_status})")
 
                 else:  # Still open
                     execution.broker_order_status = 'open'
@@ -468,7 +511,7 @@ class OrderStatusPoller:
                         self.add_order(
                             execution_id=execution.id,
                             account=account,
-                            order_id=execution.order_id,
+                            order_id=order_id_to_check,
                             strategy_name=strategy_name
                         )
 
@@ -480,6 +523,8 @@ class OrderStatusPoller:
                     'order_status': execution.status,
                     'broker_status': execution.broker_order_status,
                     'entry_price': execution.entry_price,
+                    'exit_price': execution.exit_price,
+                    'realized_pnl': execution.realized_pnl,
                     'updated': old_status != execution.status or old_broker_status != execution.broker_order_status
                 }
             else:
@@ -508,9 +553,9 @@ class OrderStatusPoller:
 
             from app.models import StrategyExecution, Strategy
 
-            # Build query for pending orders
+            # Build query for pending orders (both entry and exit pending)
             query = StrategyExecution.query.filter(
-                StrategyExecution.status == 'pending',
+                StrategyExecution.status.in_(['pending', 'exit_pending']),
                 StrategyExecution.order_id.isnot(None)
             )
 
@@ -524,6 +569,7 @@ class OrderStatusPoller:
                 'total': len(pending_executions),
                 'updated': 0,
                 'filled': 0,
+                'exited': 0,
                 'rejected': 0,
                 'still_pending': 0,
                 'errors': 0
@@ -537,9 +583,11 @@ class OrderStatusPoller:
                         results['updated'] += 1
                     if result.get('order_status') == 'entered':
                         results['filled'] += 1
+                    elif result.get('order_status') == 'exited':
+                        results['exited'] += 1
                     elif result.get('order_status') == 'failed':
                         results['rejected'] += 1
-                    elif result.get('order_status') == 'pending':
+                    elif result.get('order_status') in ['pending', 'exit_pending']:
                         results['still_pending'] += 1
                 elif result.get('status') == 'skipped':
                     pass  # Already in terminal state
@@ -550,7 +598,7 @@ class OrderStatusPoller:
                 ctx.pop()
 
             logger.info(f"[SYNC ALL] Synced {results['total']} orders: "
-                       f"{results['filled']} filled, {results['rejected']} rejected, "
+                       f"{results['filled']} filled, {results['exited']} exited, {results['rejected']} rejected, "
                        f"{results['still_pending']} pending, {results['errors']} errors")
 
             return results
