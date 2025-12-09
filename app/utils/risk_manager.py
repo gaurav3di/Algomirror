@@ -362,28 +362,24 @@ class RiskManager:
 
             exit_order_ids = []
 
-            # Get primary account for order placement
-            primary_account = TradingAccount.query.filter_by(
-                user_id=strategy.user_id,
-                is_primary=True,
-                is_active=True
-            ).first()
-
-            if not primary_account:
-                logger.error(f"No primary account found for user {strategy.user_id}")
-                return False
-
-            # Initialize OpenAlgo client
-            client = ExtendedOpenAlgoAPI(
-                api_key=primary_account.get_api_key(),
-                host=primary_account.host_url
-            )
-
             # Close each position with freeze-aware placement and retry logic
             from app.utils.freeze_quantity_handler import place_order_with_freeze_check
 
             for execution in open_executions:
                 try:
+                    # Use the account from the execution (not primary account)
+                    # Each execution might be on a different account in multi-account setups
+                    account = execution.account
+                    if not account or not account.is_active:
+                        logger.error(f"Account not found or inactive for execution {execution.id}")
+                        continue
+
+                    # Initialize OpenAlgo client for this execution's account
+                    client = ExtendedOpenAlgoAPI(
+                        api_key=account.get_api_key(),
+                        host=account.host_url
+                    )
+
                     # Reverse transaction type for exit (get action from leg)
                     leg_action = execution.leg.action.upper() if execution.leg else 'BUY'
                     exit_transaction = 'SELL' if leg_action == 'BUY' else 'BUY'
