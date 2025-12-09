@@ -1403,20 +1403,25 @@ def strategy_positions(strategy_id):
         open_positions_count = sum(1 for p in data if not p['is_closed'] and int(p['quantity']) != 0)
 
         if open_positions_count > 0:
-            # TSL only activates when there's profit to protect
-            if total_pnl > 0:
-                tsl_status['active'] = True
+            # Check if TSL was previously activated (persisted state)
+            was_active = strategy.trailing_sl_active or False
+            current_peak = strategy.trailing_sl_peak_pnl or 0.0
 
-                # Update peak P&L if current is higher
-                current_peak = strategy.trailing_sl_peak_pnl or 0.0
+            # TSL activates when P&L becomes positive (first time)
+            # Once active, it STAYS active until exit or positions closed
+            if total_pnl > 0 or was_active:
+                tsl_status['active'] = True
+                strategy.trailing_sl_active = True
+
+                # Update peak P&L only if current is higher (ratchet effect)
                 if total_pnl > current_peak:
                     strategy.trailing_sl_peak_pnl = total_pnl
-                    strategy.trailing_sl_active = True
                     current_peak = total_pnl
+                    logger.debug(f"[TSL] Strategy {strategy.name}: New peak P&L = {current_peak}")
 
                 tsl_status['peak_pnl'] = current_peak
 
-                # Calculate trigger level based on trailing SL type
+                # Calculate trigger level based on trailing SL type and peak PnL
                 trailing_value = strategy.trailing_sl
                 trailing_type = strategy.trailing_sl_type or 'percentage'
 
@@ -1434,15 +1439,18 @@ def strategy_positions(strategy_id):
                 tsl_status['trigger_pnl'] = trigger_pnl
 
                 # Check if TSL should trigger (P&L dropped below trigger)
-                if total_pnl <= trigger_pnl and not strategy.trailing_sl_triggered_at:
+                # Only trigger if we have a valid peak (not first activation)
+                if current_peak > 0 and total_pnl <= trigger_pnl and not strategy.trailing_sl_triggered_at:
                     tsl_status['should_exit'] = True
-                    logger.warning(f"[TSL] Strategy {strategy.name}: P&L {total_pnl} dropped below trigger {trigger_pnl}")
+                    logger.warning(f"[TSL] Strategy {strategy.name}: P&L {total_pnl} dropped below trigger {trigger_pnl} (Peak: {current_peak})")
             else:
-                # P&L not positive, TSL inactive but has positions
+                # P&L not positive and TSL never activated yet - waiting state
                 tsl_status['active'] = False
-                tsl_status['peak_pnl'] = strategy.trailing_sl_peak_pnl or 0.0
+                tsl_status['peak_pnl'] = 0.0
+                # Show what the trigger would be once activated
+                tsl_status['trigger_pnl'] = None
         else:
-            # No open positions, reset TSL tracking
+            # No open positions, reset TSL tracking completely
             tsl_status['no_positions'] = True
             strategy.trailing_sl_active = False
             strategy.trailing_sl_peak_pnl = 0.0

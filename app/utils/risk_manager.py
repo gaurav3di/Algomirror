@@ -240,12 +240,14 @@ class RiskManager:
 
     def check_trailing_sl(self, strategy: Strategy) -> Optional[RiskEvent]:
         """
-        Check if trailing stop loss should be triggered.
+        Check if trailing stop loss should be triggered based on COMBINED strategy P&L.
 
-        Trailing SL Types:
-        - percentage: Trail by X% of favorable movement
-        - points: Trail by X points of favorable movement
-        - amount: Trail by X rupees of favorable movement
+        TSL State Machine:
+        1. Waiting: P&L <= 0, TSL not yet activated
+        2. Active: P&L became positive, now tracking peak and calculating trigger
+        3. Triggered: P&L dropped below trigger level, exit all positions
+
+        Once Active, TSL stays active until exit (doesn't go back to Waiting).
 
         Args:
             strategy: Strategy to check
@@ -257,14 +259,6 @@ class RiskManager:
         if not strategy.trailing_sl or strategy.trailing_sl <= 0:
             return None
 
-        # Calculate current P&L
-        pnl_data = self.calculate_strategy_pnl(strategy)
-        current_pnl = pnl_data['total_pnl']
-
-        # Get trailing SL type
-        trailing_type = strategy.trailing_sl_type or 'percentage'
-        trailing_value = float(strategy.trailing_sl)
-
         try:
             # Get all open executions
             open_executions = StrategyExecution.query.filter_by(
@@ -273,86 +267,71 @@ class RiskManager:
             ).all()
 
             if not open_executions:
+                # No open positions - reset TSL state
+                if strategy.trailing_sl_active:
+                    strategy.trailing_sl_active = False
+                    strategy.trailing_sl_peak_pnl = 0.0
+                    strategy.trailing_sl_trigger_pnl = None
+                    db.session.commit()
                 return None
 
-            # Check each execution for trailing SL trigger
-            for execution in open_executions:
-                # Skip if no real-time price available
-                if not execution.last_price or execution.last_price <= 0:
-                    continue
+            # Calculate COMBINED strategy P&L (not individual execution P&L)
+            pnl_data = self.calculate_strategy_pnl(strategy)
+            current_pnl = pnl_data['total_pnl']
 
-                entry_price = float(execution.entry_price or 0)
-                current_price = float(execution.last_price)
-                # Get action from leg (transaction_type doesn't exist on StrategyExecution)
-                is_long = execution.leg and execution.leg.action.upper() == 'BUY'
+            # Get trailing SL settings
+            trailing_type = strategy.trailing_sl_type or 'percentage'
+            trailing_value = float(strategy.trailing_sl)
 
-                # Calculate trigger price based on type
-                trigger_price = None
+            # Check if TSL was previously activated (persisted state)
+            was_active = strategy.trailing_sl_active or False
+            current_peak = strategy.trailing_sl_peak_pnl or 0.0
 
+            # TSL activates when P&L becomes positive (first time)
+            # Once active, it STAYS active until exit or positions closed
+            if current_pnl > 0 or was_active:
+                strategy.trailing_sl_active = True
+
+                # Update peak P&L only if current is higher (ratchet effect)
+                if current_pnl > current_peak:
+                    strategy.trailing_sl_peak_pnl = current_pnl
+                    current_peak = current_pnl
+                    logger.debug(f"[TSL] Strategy {strategy.name}: New peak P&L = {current_peak}")
+
+                # Calculate trigger level based on trailing SL type and peak PnL
                 if trailing_type == 'percentage':
-                    # Trail by percentage
-                    if is_long:
-                        # For long: trigger = entry + (current - entry) * (1 - trailing_pct/100)
-                        if current_price > entry_price:
-                            trigger_price = entry_price + (current_price - entry_price) * (1 - trailing_value / 100)
-                    else:
-                        # For short: trigger = entry - (entry - current) * (1 - trailing_pct/100)
-                        if current_price < entry_price:
-                            trigger_price = entry_price - (entry_price - current_price) * (1 - trailing_value / 100)
-
+                    trigger_pnl = current_peak * (1 - trailing_value / 100)
                 elif trailing_type == 'points':
-                    # Trail by points
-                    if is_long:
-                        if current_price > entry_price:
-                            trigger_price = current_price - trailing_value
-                    else:
-                        if current_price < entry_price:
-                            trigger_price = current_price + trailing_value
+                    trigger_pnl = current_peak - trailing_value
+                else:  # 'amount'
+                    trigger_pnl = current_peak - trailing_value
 
-                elif trailing_type == 'amount':
-                    # Trail by amount (rupees)
-                    quantity = int(execution.quantity or 1)
-                    points = trailing_value / quantity  # Convert amount to points
+                strategy.trailing_sl_trigger_pnl = trigger_pnl
+                db.session.commit()
 
-                    if is_long:
-                        if current_price > entry_price:
-                            trigger_price = current_price - points
-                    else:
-                        if current_price < entry_price:
-                            trigger_price = current_price + points
+                # Check if TSL should trigger (P&L dropped below trigger)
+                # Only trigger if we have a valid peak (TSL was truly active)
+                if current_peak > 0 and current_pnl <= trigger_pnl and not strategy.trailing_sl_triggered_at:
+                    logger.warning(
+                        f"[TSL] Trailing SL triggered for {strategy.name}: "
+                        f"P&L={current_pnl}, Trigger={trigger_pnl}, Peak={current_peak}"
+                    )
 
-                # Check if current price has hit trailing SL
-                if trigger_price:
-                    # Update highest trigger price seen
-                    if not execution.trailing_sl_triggered or current_price > execution.trailing_sl_triggered:
-                        execution.trailing_sl_triggered = trigger_price
-                        db.session.commit()
+                    # Mark as triggered to prevent re-triggering
+                    strategy.trailing_sl_triggered_at = datetime.utcnow()
+                    db.session.commit()
 
-                    # Check if price has reversed and hit the trailing SL
-                    should_trigger = False
-                    if is_long and current_price <= trigger_price:
-                        should_trigger = True
-                    elif not is_long and current_price >= trigger_price:
-                        should_trigger = True
+                    # Create risk event
+                    risk_event = RiskEvent(
+                        strategy_id=strategy.id,
+                        event_type='trailing_sl',
+                        threshold_value=trigger_pnl,
+                        current_value=current_pnl,
+                        action_taken='close_all',
+                        notes=f"Trailing SL triggered: P&L {current_pnl:.2f} dropped below trigger {trigger_pnl:.2f} (Peak: {current_peak:.2f})"
+                    )
 
-                    if should_trigger:
-                        logger.warning(
-                            f"Trailing SL triggered for {strategy.name} - {execution.symbol}: "
-                            f"Price={current_price}, Trigger={trigger_price}"
-                        )
-
-                        # Create risk event
-                        risk_event = RiskEvent(
-                            strategy_id=strategy.id,
-                            execution_id=execution.id,
-                            event_type='trailing_sl',
-                            threshold_value=trigger_price,
-                            current_value=current_price,
-                            action_taken='close_all',
-                            notes=f"Trailing SL triggered: Price {current_price} hit trigger {trigger_price}"
-                        )
-
-                        return risk_event
+                    return risk_event
 
         except Exception as e:
             logger.error(f"Error checking trailing SL for {strategy.name}: {e}")
