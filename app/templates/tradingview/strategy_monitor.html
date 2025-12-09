@@ -112,7 +112,12 @@
         <div class="card-body">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="card-title">Combined Premium with Supertrend</h2>
-                <div class="flex gap-2">
+                <div class="flex gap-2 items-center">
+                    <!-- Chart Type Toggle -->
+                    <div class="btn-group">
+                        <button id="lineChartBtn" class="btn btn-sm btn-active" onclick="setChartType('line')">Line</button>
+                        <button id="candleChartBtn" class="btn btn-sm" onclick="setChartType('candle')">Candle</button>
+                    </div>
                     <button onclick="refreshChart()" class="btn btn-ghost btn-sm">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
@@ -201,6 +206,38 @@ let chart = null;
 let premiumSeries = null;
 let supertrendSeries = null;
 let autoUpdateInterval = null;
+let chartType = 'line'; // Default to line chart
+let lastChartData = null; // Store last fetched data for chart type switching
+
+// Set chart type and reinitialize
+function setChartType(type) {
+    chartType = type;
+
+    // Update button states
+    const lineBtn = document.getElementById('lineChartBtn');
+    const candleBtn = document.getElementById('candleChartBtn');
+
+    if (type === 'line') {
+        lineBtn.classList.add('btn-active');
+        candleBtn.classList.remove('btn-active');
+    } else {
+        lineBtn.classList.remove('btn-active');
+        candleBtn.classList.add('btn-active');
+    }
+
+    // Reinitialize chart with new type
+    if (chart) {
+        chart.remove();
+    }
+    initChart();
+
+    // If we have data, update immediately without fetching
+    if (lastChartData) {
+        applyChartData(lastChartData.data, lastChartData.signal);
+    } else {
+        updateChart();
+    }
+}
 
 // Get theme-aware colors
 function getThemeColors() {
@@ -258,14 +295,28 @@ function initChart() {
         },
     });
 
-    // Create line series for combined premium (v5 API) - black in light mode, white in dark mode
-    premiumSeries = chart.addSeries(LightweightCharts.LineSeries, {
-        color: colors.priceLineColor,
-        lineWidth: 2,
-        title: 'Combined Premium',
-    });
+    // Create premium series based on chart type
+    if (chartType === 'candle') {
+        // Candlestick series for OHLC data
+        premiumSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
+            upColor: '#22c55e',
+            downColor: '#ef4444',
+            borderUpColor: '#22c55e',
+            borderDownColor: '#ef4444',
+            wickUpColor: '#22c55e',
+            wickDownColor: '#ef4444',
+            title: 'Combined Premium',
+        });
+    } else {
+        // Line series for close price (default)
+        premiumSeries = chart.addSeries(LightweightCharts.LineSeries, {
+            color: colors.priceLineColor,
+            lineWidth: 2,
+            title: 'Combined Premium',
+        });
+    }
 
-    // Create line series for Supertrend (v5 API)
+    // Create line series for Supertrend (always a line)
     supertrendSeries = chart.addSeries(LightweightCharts.LineSeries, {
         color: '#ef4444',
         lineWidth: 2,
@@ -292,30 +343,16 @@ async function updateChart() {
         const result = await response.json();
 
         if (result.status === 'success') {
-            const data = result.data;
+            // Store data for chart type switching
+            lastChartData = {
+                data: result.data,
+                signal: result.signal
+            };
 
-            // Prepare line data for combined premium (using close price)
-            const premiumData = data.map(d => ({
-                time: d.time,
-                value: d.close,
-            }));
+            // Apply data to chart
+            applyChartData(result.data, result.signal);
 
-            // Prepare Supertrend data (filter out nulls)
-            const supertrendData = data
-                .filter(d => d.supertrend !== null)
-                .map(d => ({
-                    time: d.time,
-                    value: d.supertrend,
-                }));
-
-            // Update series
-            premiumSeries.setData(premiumData);
-            supertrendSeries.setData(supertrendData);
-
-            // Update signal display
-            updateSignal(result.signal);
-
-            console.log(`Chart updated: ${data.length} bars, Signal: ${result.signal}`);
+            console.log(`Chart updated: ${result.data.length} bars, Signal: ${result.signal}, Type: ${chartType}`);
         } else {
             console.error('Failed to fetch chart data:', result.message);
             showNotification(result.message || 'Failed to load chart data', 'error');
@@ -324,6 +361,40 @@ async function updateChart() {
         console.error('Error updating chart:', error);
         showNotification('Error updating chart', 'error');
     }
+}
+
+// Apply data to chart based on current chart type
+function applyChartData(data, signal) {
+    if (chartType === 'candle') {
+        // Prepare OHLC data for candlestick chart
+        const candleData = data.map(d => ({
+            time: d.time,
+            open: d.open,
+            high: d.high,
+            low: d.low,
+            close: d.close,
+        }));
+        premiumSeries.setData(candleData);
+    } else {
+        // Prepare line data (using close price)
+        const lineData = data.map(d => ({
+            time: d.time,
+            value: d.close,
+        }));
+        premiumSeries.setData(lineData);
+    }
+
+    // Prepare Supertrend data (filter out nulls)
+    const supertrendData = data
+        .filter(d => d.supertrend !== null)
+        .map(d => ({
+            time: d.time,
+            value: d.supertrend,
+        }));
+    supertrendSeries.setData(supertrendData);
+
+    // Update signal display
+    updateSignal(signal);
 }
 
 // Update signal display
