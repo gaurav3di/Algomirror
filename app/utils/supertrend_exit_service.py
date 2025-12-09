@@ -60,16 +60,18 @@ class SupertrendExitService:
             self.scheduler.start()
             self.is_running = True
 
-            # Schedule monitoring every minute (will check strategies and monitor at appropriate intervals)
+            # Schedule monitoring at the start of every minute (second=0) for precise candle close detection
+            # This ensures checks happen exactly at 9:27:00, 9:30:00, etc.
+            # The should_check_strategy function filters based on strategy timeframe
             self.scheduler.add_job(
                 func=self.monitor_strategies,
-                trigger='interval',
-                minutes=1,
+                trigger='cron',
+                second=0,  # Run at :00 of every minute
                 id='supertrend_monitor',
                 replace_existing=True
             )
 
-            logger.info("Supertrend Exit Service started - monitoring every minute")
+            logger.info("Supertrend Exit Service started - monitoring at start of each minute")
 
     def stop_service(self):
         """Stop the background service"""
@@ -117,13 +119,16 @@ class SupertrendExitService:
 
     def should_check_strategy(self, strategy: Strategy) -> bool:
         """
-        Determine if enough time has passed to check this strategy
-        based on its timeframe (to check on candle close)
+        Determine if this is a candle close time for the strategy's timeframe.
+        Called at :00 seconds of each minute via cron trigger.
+
+        For 3m: checks at :00, :03, :06, :09, :12, :15, :18, :21, :24, :27, :30, etc.
+        For 5m: checks at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
+        For 10m: checks at :00, :10, :20, :30, :40, :50
+        For 15m: checks at :00, :15, :30, :45
         """
         now = datetime.now(pytz.timezone('Asia/Kolkata'))
-
-        # Get last check time
-        last_check = self.monitoring_strategies.get(strategy.id)
+        current_minute = now.minute
 
         # Map timeframe to minutes
         timeframe_minutes = {
@@ -135,27 +140,8 @@ class SupertrendExitService:
 
         interval_minutes = timeframe_minutes.get(strategy.supertrend_timeframe, 5)
 
-        # Check on candle close (when current minute aligns with timeframe)
-        # For example, 5m candle closes at :00, :05, :10, :15, etc.
-        current_minute = now.minute
-
-        # Check if current minute aligns with the timeframe
-        # For 1m: every minute
-        # For 5m: at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
-        # For 15m: at :00, :15, :30, :45
-        is_candle_close = (current_minute % interval_minutes) == 0
-
-        if not is_candle_close:
-            return False
-
-        # If we haven't checked yet, or if enough time has passed since last check
-        if last_check is None:
-            return True
-
-        time_since_last_check = (now - last_check).total_seconds() / 60
-
-        # Only check if at least the timeframe interval has passed
-        return time_since_last_check >= interval_minutes
+        # Check if current minute aligns with the timeframe (candle close)
+        return (current_minute % interval_minutes) == 0
 
     def check_supertrend_exit(self, strategy: Strategy, app):
         """
