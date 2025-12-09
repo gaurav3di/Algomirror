@@ -194,9 +194,8 @@ exclude = [
 ]
 ignore = ["E203", "E266", "E501", "W503"]
 
-[tool.uv]
-# UV-specific configuration
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0.0",
     "pytest-flask>=1.2.0",
     "pytest-cov>=4.0.0",
