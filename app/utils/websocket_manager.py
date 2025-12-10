@@ -232,7 +232,7 @@ class ProfessionalWebSocketManager:
             # Reduced logging - only log non-market data or use debug level
             msg_type = data.get('type')
             if msg_type != 'market_data':
-                logger.info(f"[WS_MSG] Received: type={msg_type}, symbol={data.get('symbol')}, exchange={data.get('exchange')}")
+                logger.debug(f"[WS_MSG] Received: type={msg_type}, symbol={data.get('symbol')}, exchange={data.get('exchange')}")
             else:
                 logger.debug(f"[WS_DATA] Market data for {data.get('symbol')}")
             
@@ -251,7 +251,7 @@ class ProfessionalWebSocketManager:
             
             # Handle subscription response
             if data.get("type") == "subscribe":
-                logger.info(f"[WS_SUB] Subscription response: status={data.get('status')}, message={data.get('message')}")
+                logger.debug(f"[WS_SUB] Subscription response: status={data.get('status')}, message={data.get('message')}")
                 return
             
             # Update metrics
@@ -485,7 +485,7 @@ class ProfessionalWebSocketManager:
 
                 mode_num = mode_map.get(mode, 1)  # Default to LTP
 
-                logger.info(f"[WS_BATCH] Subscribing to {len(instruments)} instruments in {mode} mode")
+                logger.debug(f"[WS_BATCH] Subscribing to {len(instruments)} instruments in {mode} mode")
 
                 # Send individual subscription messages for each instrument
                 for inst in instruments:
@@ -538,11 +538,11 @@ class ProfessionalWebSocketManager:
                 logger.error(f"[WS_SUBSCRIBE] Missing symbol or exchange: symbol={symbol}, exchange={exchange}")
                 return False
 
-            logger.info(f"[WS_SUBSCRIBE] Request: {symbol} on {exchange} in {mode} mode")
+            logger.debug(f"[WS_SUBSCRIBE] Request: {symbol} on {exchange} in {mode} mode")
 
             # Check if authenticated
             if not self.authenticated:
-                logger.warning(f"[WS_SUBSCRIBE] Not authenticated, queuing {symbol}")
+                logger.debug(f"[WS_SUBSCRIBE] Not authenticated, queuing {symbol}")
                 self.subscriptions.add(json.dumps(subscription))
                 return False
 
@@ -565,7 +565,7 @@ class ProfessionalWebSocketManager:
                     'depth': 5  # Default depth level
                 }
 
-                logger.info(f"[WS_SUBSCRIBE] Sending subscription for {symbol}")
+                logger.debug(f"[WS_SUBSCRIBE] Sending subscription for {symbol}")
                 self.ws.send(json.dumps(message))
                 self.subscriptions.add(json.dumps(subscription))
 

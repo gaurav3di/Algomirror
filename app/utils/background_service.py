@@ -88,7 +88,7 @@ class OptionChainBackgroundService:
         # Return existing if already created and connected
         if self.shared_websocket_manager and \
            self.shared_websocket_manager.authenticated:
-            logger.info("Using existing shared WebSocket manager")
+            logger.debug("Using existing shared WebSocket manager")
             return self.shared_websocket_manager
 
         # Create new shared WebSocket manager if needed

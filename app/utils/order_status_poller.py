@@ -85,7 +85,7 @@ class OrderStatusPoller:
                 'added_time': datetime.utcnow(),
                 'check_count': 0
             }
-            logger.info(f"[POLLER] Added order {order_id} (execution {execution_id}) to polling queue. "
+            logger.debug(f"[POLLER] Added order {order_id} (execution {execution_id}) to polling queue. "
                        f"Queue size: {len(self.pending_orders)}")
 
     def remove_order(self, execution_id: int):
@@ -93,7 +93,7 @@ class OrderStatusPoller:
         with self._lock:
             order_info = self.pending_orders.pop(execution_id, None)
             if order_info:
-                logger.info(f"[POLLER] Removed order {order_info['order_id']} (execution {execution_id}) from polling queue. "
+                logger.debug(f"[POLLER] Removed order {order_info['order_id']} (execution {execution_id}) from polling queue. "
                            f"Queue size: {len(self.pending_orders)}")
                 return True
             return False
