@@ -1,6 +1,9 @@
 {% extends "layout.html" %}
 {% from 'macros/account_badge.html' import account_badge, account_dot, get_account_badge_color %}
 
+{# Macro to format amount in Lakhs if >= 1L, otherwise show actual #}
+{% macro format_lakhs(amount) %}{% if amount >= 100000 %}{{ "%.2fL"|format(amount / 100000) }}{% else %}{{ "{:,.2f}".format(amount) }}{% endif %}{% endmacro %}
+
 {% block title %}Funds - AlgoMirror{% endblock %}
 
 {% block page_title %}Funds{% endblock %}
@@ -46,30 +49,30 @@
         {% set total_m2m_realized = funds_data | map(attribute='m2mrealized') | map('float') | sum %}
         {% set total_m2m_unrealized = funds_data | map(attribute='m2munrealized') | map('float') | sum %}
         {% set total_used_debits = funds_data | map(attribute='utiliseddebits') | map('float') | sum %}
-        
+
         <div class="stat">
             <div class="stat-title">Total Available Cash</div>
-            <div class="stat-value text-primary">₹{{ "%.2f"|format(total_available) }}</div>
+            <div class="stat-value text-primary">₹{{ format_lakhs(total_available) }}</div>
             <div class="stat-desc">Across {{ funds_data|length }} accounts</div>
         </div>
-        
+
         <div class="stat">
             <div class="stat-title">M2M Realized</div>
             <div class="stat-value {{ 'text-success' if total_m2m_realized >= 0 else 'text-error' }}">
                 ₹{{ "%.2f"|format(total_m2m_realized) }}
             </div>
         </div>
-        
+
         <div class="stat">
             <div class="stat-title">M2M Unrealized</div>
             <div class="stat-value {{ 'text-success' if total_m2m_unrealized >= 0 else 'text-error' }}">
                 ₹{{ "%.2f"|format(total_m2m_unrealized) }}
             </div>
         </div>
-        
+
         <div class="stat">
             <div class="stat-title">Used Debits</div>
-            <div class="stat-value text-warning">₹{{ "%.2f"|format(total_used_debits) }}</div>
+            <div class="stat-value text-warning">₹{{ format_lakhs(total_used_debits) }}</div>
         </div>
     </div>
     {% endif %}
@@ -102,11 +105,8 @@
                 <div class="stat {{ 'bg-transparent p-0' if single_account else 'bg-base-200' }}">
                     <div class="stat-title {{ 'text-base' if single_account }}">Available Cash</div>
                     <div class="stat-value text-primary {{ 'text-2xl' if single_account }}">
-                        ₹{{ "%.2f"|format(fund.availablecash|float) }}
+                        ₹{{ format_lakhs(fund.availablecash|float) }}
                     </div>
-                    {% if fund.collateral and fund.collateral|float > 0 %}
-                    <div class="stat-desc">Collateral: ₹{{ "%.2f"|format(fund.collateral|float) }}</div>
-                    {% endif %}
                 </div>
                 
                 <!-- P&L Section -->
@@ -131,7 +131,7 @@
                 <div class="stat bg-base-200 mt-4">
                     <div class="stat-title">Used Debits</div>
                     <div class="stat-value text-warning text-lg">
-                        ₹{{ "%.2f"|format(fund.utiliseddebits|float) }}
+                        ₹{{ format_lakhs(fund.utiliseddebits|float) }}
                     </div>
                 </div>
                 {% endif %}

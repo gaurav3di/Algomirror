@@ -365,6 +365,16 @@
 </dialog>
 
 <script>
+// Format number in Lakhs if >= 1 lakh, otherwise show actual (e.g., 597000 → "5.97L", 56000 → "56,000")
+function formatInLakhs(num) {
+    if (num >= 100000) {
+        const lakhs = num / 100000;
+        return lakhs.toFixed(2) + 'L';
+    } else {
+        return num.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+}
+
 // Strategy Dashboard JavaScript (migrated from /strategy)
 // Trading hours management
 let isTradingHours = null; // null = not yet checked, true/false after first check
@@ -568,18 +578,18 @@ async function loadAccountFunds() {
 
                 const availableEl = document.getElementById(`available-${account.id}`);
                 if (availableEl) {
-                    availableEl.textContent = `₹${available.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                    availableEl.textContent = `₹${formatInLakhs(available)}`;
                 }
 
                 const marginEl = document.getElementById(`margin-${account.id}`);
                 if (marginEl) {
                     const margin = parseFloat(funds.utiliseddebits || funds.used_margin) || 0;
-                    marginEl.textContent = `₹${margin.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                    marginEl.textContent = `₹${formatInLakhs(margin)}`;
                 }
 
                 const cashEl = document.getElementById(`cash-${account.id}`);
                 if (cashEl) {
-                    cashEl.textContent = `₹${cash.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                    cashEl.textContent = `₹${formatInLakhs(cash)}`;
                 }
 
                 totalCash += cash;
@@ -588,9 +598,9 @@ async function loadAccountFunds() {
                 const marginEl = document.getElementById(`margin-${account.id}`);
                 const cashEl = document.getElementById(`cash-${account.id}`);
 
-                if (availableEl) availableEl.textContent = '₹0.00';
-                if (marginEl) marginEl.textContent = '₹0.00';
-                if (cashEl) cashEl.textContent = '₹0.00';
+                if (availableEl) availableEl.textContent = '₹0.00L';
+                if (marginEl) marginEl.textContent = '₹0.00L';
+                if (cashEl) cashEl.textContent = '₹0.00L';
             }
         } else {
             // Promise rejected
@@ -612,7 +622,7 @@ async function loadAccountFunds() {
     // Update total cash
     const totalCashEl = document.getElementById('total-available-cash');
     if (totalCashEl) {
-        totalCashEl.textContent = `₹ ${totalCash.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        totalCashEl.textContent = `₹ ${formatInLakhs(totalCash)}`;
     }
 }
 

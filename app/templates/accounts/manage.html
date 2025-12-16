@@ -75,19 +75,16 @@
                 {% endif %}
                 
                 {% if account.last_funds_data %}
+                {% set avail_cash = account.last_funds_data.get('availablecash', 0)|float %}
                 <div class="divider"></div>
                 <div class="space-y-1">
                     <div class="flex justify-between">
                         <span class="opacity-70">Available Cash:</span>
-                        <span class="font-mono">₹{{ "%.2f"|format(account.last_funds_data.get('availablecash', 0)|float) }}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="opacity-70">Collateral:</span>
-                        <span class="font-mono">₹{{ "%.2f"|format(account.last_funds_data.get('collateral', 0)|float) }}</span>
+                        <span class="font-mono">₹{% if avail_cash >= 100000 %}{{ "%.2fL"|format(avail_cash / 100000) }}{% else %}{{ "{:,.2f}".format(avail_cash) }}{% endif %}</span>
                     </div>
                     <div class="flex justify-between">
                         <span class="opacity-70">Cash:</span>
-                        <span class="font-mono font-semibold">₹{{ "%.2f"|format((account.last_funds_data.get('availablecash', 0)|float - account.last_funds_data.get('collateral', 0)|float)) }}</span>
+                        <span class="font-mono font-semibold">₹{% if avail_cash >= 100000 %}{{ "%.2fL"|format(avail_cash / 100000) }}{% else %}{{ "{:,.2f}".format(avail_cash) }}{% endif %}</span>
                     </div>
                     <div class="flex justify-between">
                         <span class="opacity-70">M2M P&L:</span>
