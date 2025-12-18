@@ -9,6 +9,11 @@ from flask import Flask
 from app import create_app, db
 from app.models import User, TradingAccount, ActivityLog, TradingHoursTemplate, TradingSession, MarketHoliday
 
+# Ensure the instance directory exists (required for SQLite DB path)
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+INSTANCE_DIR = os.path.join(PROJECT_ROOT, 'instance')
+os.makedirs(INSTANCE_DIR, exist_ok=True)
+
 def init_database():
     """Initialize the database with tables"""
     print("Initializing AlgoMirror database...")
