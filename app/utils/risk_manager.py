@@ -354,6 +354,14 @@ class RiskManager:
             # Get open executions
             open_executions = [e for e in executions if e.status == 'entered']
 
+            # Log execution status summary
+            if executions:
+                status_counts = {}
+                for e in executions:
+                    status_counts[e.status] = status_counts.get(e.status, 0) + 1
+                logger.debug(f"[P&L] Strategy {strategy.name}: {len(executions)} executions, statuses: {status_counts}")
+                print(f"[P&L DEBUG] {strategy.name}: {len(executions)} executions, open={len(open_executions)}, statuses={status_counts}")
+
             # Check if any WebSocket prices are stale (need API fallback)
             api_prices = {}
             needs_api_fallback = False
@@ -386,9 +394,16 @@ class RiskManager:
                     # Try WebSocket price first (from position_monitor)
                     if execution.last_price and execution.last_price > 0:
                         current_price = float(execution.last_price)
+                        logger.debug(f"[P&L] {execution.symbol}: Using WebSocket price {current_price}")
                     # Fallback to API price if WebSocket stale
                     elif api_prices.get(execution.symbol):
                         current_price = api_prices.get(execution.symbol)
+                        logger.debug(f"[P&L] {execution.symbol}: Using API price {current_price}")
+                    # FINAL fallback to entry price (assume breakeven)
+                    elif execution.entry_price and execution.entry_price > 0:
+                        current_price = float(execution.entry_price)
+                        logger.warning(f"[P&L] {execution.symbol}: NO PRICE DATA! Using entry price {current_price} as fallback (P&L=0)")
+                        print(f"[P&L WARNING] {execution.symbol}: No WebSocket/API price, using entry price {current_price}")
 
                 if current_price and execution.status == 'entered':
                     # Calculate P&L using best available price
@@ -397,9 +412,17 @@ class RiskManager:
                     is_long = execution.leg and execution.leg.action.upper() == 'BUY'
 
                     if is_long:
-                        total_unrealized += (current_price - entry_price) * quantity
+                        pnl = (current_price - entry_price) * quantity
+                        total_unrealized += pnl
                     else:
-                        total_unrealized += (entry_price - current_price) * quantity
+                        pnl = (entry_price - current_price) * quantity
+                        total_unrealized += pnl
+
+                    logger.debug(f"[P&L] {execution.symbol}: entry={entry_price}, current={current_price}, qty={quantity}, pnl={pnl:.2f}")
+                elif execution.status == 'entered':
+                    # OPEN position but no price - this shouldn't happen!
+                    logger.error(f"[P&L] {execution.symbol}: OPEN position with NO price data! status={execution.status}, last_price={execution.last_price}, entry_price={execution.entry_price}")
+                    print(f"[P&L ERROR] {execution.symbol}: OPEN position but NO PRICE! last_price={execution.last_price}")
                 else:
                     # Exited positions - calculate realized P&L
                     realized, unrealized = self.calculate_execution_pnl(execution)
@@ -697,28 +720,9 @@ class RiskManager:
             strategy.trailing_sl_trigger_pnl = current_stop
             db.session.commit()
 
-            # SANITY CHECK: Prevent false triggers due to P&L calculation issues
-            # If P&L is 0 (or very close) but peak was significantly higher, this is likely a data issue
-            # Don't trigger exit in this case - wait for valid P&L data
-            if abs(current_pnl) < 1.0 and current_peak > 50.0:
-                logger.warning(
-                    f"[TSL SANITY CHECK] Strategy {strategy.name}: P&L={current_pnl:.2f} appears invalid "
-                    f"(near 0 but peak was {current_peak:.2f}). Skipping exit trigger - likely data issue."
-                )
-                print(f"[TSL SANITY] Skipping exit for {strategy.name}: P&L={current_pnl:.2f}, Peak={current_peak:.2f} - likely data issue")
-                return None
-
-            # SANITY CHECK 2: If current stop is positive (profit-locked) but P&L suddenly dropped to 0 or negative
-            # AND the drop is more than 80% of peak, this is likely a data issue
-            if current_stop > 0 and current_pnl <= 0 and current_peak > 100:
-                pnl_drop_pct = ((current_peak - current_pnl) / current_peak) * 100 if current_peak > 0 else 0
-                if pnl_drop_pct > 80:
-                    logger.warning(
-                        f"[TSL SANITY CHECK] Strategy {strategy.name}: P&L dropped {pnl_drop_pct:.1f}% from peak "
-                        f"({current_peak:.2f} -> {current_pnl:.2f}). Skipping exit trigger - likely data issue."
-                    )
-                    print(f"[TSL SANITY] Skipping exit for {strategy.name}: {pnl_drop_pct:.1f}% drop from peak - likely data issue")
-                    return None
+            # Log current TSL status
+            logger.info(f"[TSL CHECK] Strategy {strategy.name}: P&L={current_pnl:.2f}, Peak={current_peak:.2f}, Stop={current_stop:.2f}")
+            print(f"[TSL CHECK] {strategy.name}: P&L={current_pnl:.2f}, Peak={current_peak:.2f}, Stop={current_stop:.2f}")
 
             # Exit when P&L drops to or below current stop
             if current_pnl <= current_stop:
