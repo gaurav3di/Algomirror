@@ -306,9 +306,86 @@ class StrategyExecutor:
                 print(f"[MAIN SESSION] Leg {leg.leg_number} had no results at all - order not attempted?")
                 logger.warning(f"[MAIN SESSION] Leg {leg.leg_number} had no results - order may not have been attempted")
 
+        # INITIALIZE TSL VALUES immediately after execution
+        # This ensures Initial Stop and Current Stop are available without refresh
+        if self.strategy.trailing_sl and self.strategy.trailing_sl > 0:
+            try:
+                self._initialize_tsl_values(results)
+            except Exception as e:
+                logger.error(f"[TSL INIT] Failed to initialize TSL values: {e}")
+                print(f"[TSL INIT] Error initializing TSL: {e}")
+
         print(f"[MAIN SESSION] ========== COMPLETED ==========")
 
         return results
+
+    def _initialize_tsl_values(self, results: List[Dict]):
+        """
+        Initialize TSL (Trailing Stop Loss) values immediately after order execution.
+        This calculates the initial_stop based on entry prices so it's available without refresh.
+        """
+        try:
+            # Refresh strategy from DB
+            strategy = Strategy.query.get(self.strategy.id)
+            if not strategy or not strategy.trailing_sl:
+                return
+
+            # Get all entered executions for this strategy
+            open_executions = StrategyExecution.query.filter_by(
+                strategy_id=strategy.id,
+                status='entered'
+            ).all()
+
+            if not open_executions:
+                logger.debug(f"[TSL INIT] No open executions found for strategy {strategy.name}")
+                return
+
+            # Calculate net premium from entry prices
+            # SELL legs contribute positive premium (we receive)
+            # BUY legs contribute negative premium (we pay)
+            net_premium = 0.0
+            entry_value = 0.0
+
+            for execution in open_executions:
+                if execution.entry_price and execution.quantity:
+                    position_value = execution.entry_price * execution.quantity
+                    entry_value += position_value
+
+                    leg_action = execution.leg.action.upper() if execution.leg else 'BUY'
+                    if leg_action == 'SELL':
+                        net_premium += position_value  # Credit received
+                    else:
+                        net_premium -= position_value  # Debit paid
+
+            logger.debug(f"[TSL INIT] Strategy {strategy.name}: Net Premium={net_premium:.2f}, Entry Value={entry_value:.2f}")
+
+            # Calculate initial stop based on trailing SL type and value
+            trailing_type = strategy.trailing_sl_type or 'percentage'
+            trailing_value = strategy.trailing_sl
+
+            if trailing_type == 'percentage':
+                # Initial stop = -X% of entry value
+                initial_stop_pnl = -entry_value * (trailing_value / 100)
+            elif trailing_type == 'points':
+                initial_stop_pnl = -trailing_value
+            else:  # 'amount'
+                initial_stop_pnl = -trailing_value
+
+            # Set TSL values
+            strategy.trailing_sl_initial_stop = initial_stop_pnl
+            strategy.trailing_sl_active = True
+            strategy.trailing_sl_peak_pnl = 0.0  # Start at 0, will be updated by risk manager
+            strategy.trailing_sl_trigger_pnl = initial_stop_pnl  # Current stop = initial stop at start
+
+            db.session.commit()
+
+            logger.info(f"[TSL INIT] Strategy {strategy.name}: Initial Stop={initial_stop_pnl:.2f}, "
+                       f"Entry Value={entry_value:.2f}, Type={trailing_type}, Value={trailing_value}")
+            print(f"[TSL INIT] {strategy.name}: Initial Stop=Rs.{initial_stop_pnl:.2f}")
+
+        except Exception as e:
+            logger.error(f"[TSL INIT] Error initializing TSL values: {e}", exc_info=True)
+            db.session.rollback()
 
     def _execute_leg_parallel(self, leg: StrategyLeg, results: List, results_lock):
         """

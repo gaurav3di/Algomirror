@@ -953,8 +953,18 @@ class RiskManager:
                             # Log the full response for debugging
                             logger.info(f"[RISK EXIT] Order response for {execution.symbol}: {response}")
                             print(f"[RISK EXIT] Response for {execution.symbol}: {response}")
-                            if response and isinstance(response, dict):
+                            # FIXED: Only break on SUCCESS, not on any dict response
+                            if response and isinstance(response, dict) and response.get('status') == 'success':
                                 break
+                            elif response and isinstance(response, dict):
+                                # API returned error, log and retry
+                                error_msg = response.get('message', 'Unknown error')
+                                logger.warning(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} API error for {execution.symbol}: {error_msg}")
+                                print(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} API ERROR: {error_msg}")
+                                if attempt < max_retries - 1:
+                                    import time
+                                    time.sleep(retry_delay)
+                                    retry_delay *= 2
                         except Exception as api_error:
                             logger.warning(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} failed for {execution.symbol} on {account.account_name}: {api_error}")
                             print(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} FAILED: {api_error}")
