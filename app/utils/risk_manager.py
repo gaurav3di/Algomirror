@@ -890,6 +890,24 @@ class RiskManager:
                     print(f"[RISK EXIT PHASE 2] All SELL positions closed. Starting BUY position exits...")
                 logger.debug(f"[RISK EXIT] Processing execution {idx + 1}/{len(open_executions)}: ID={execution.id}, symbol={execution.symbol}")
                 try:
+                    # CRITICAL: Re-fetch execution to get latest state (prevent race condition/double orders)
+                    execution = StrategyExecution.query.get(execution.id)
+                    if not execution:
+                        logger.warning(f"[RISK EXIT] Execution {execution.id} no longer exists, skipping")
+                        continue
+
+                    # CRITICAL: Skip if exit order already placed (prevent double orders)
+                    if execution.exit_order_id:
+                        logger.warning(f"[RISK EXIT] SKIPPING execution {execution.id} for {execution.symbol}: exit_order_id={execution.exit_order_id} already exists (preventing double order)")
+                        print(f"[RISK EXIT] SKIPPING {execution.symbol}: exit order already placed")
+                        continue
+
+                    # CRITICAL: Skip if status is not 'entered' (already exiting or exited)
+                    if execution.status not in ['entered', 'exit_pending']:
+                        logger.warning(f"[RISK EXIT] SKIPPING execution {execution.id}: status={execution.status} (not entered)")
+                        print(f"[RISK EXIT] SKIPPING {execution.symbol}: status={execution.status}")
+                        continue
+
                     # CRITICAL: Skip if quantity is 0 or None (position already closed at broker level)
                     if not execution.quantity or execution.quantity <= 0:
                         logger.warning(f"[RISK EXIT] SKIPPING execution {execution.id} for {execution.symbol}: quantity is {execution.quantity} (position may already be closed)")
@@ -986,12 +1004,14 @@ class RiskManager:
                         )
                         print(f"[RISK EXIT] SUCCESS: {execution.symbol} on {account.account_name} - Order ID: {order_id}")
 
-                        # Update execution status - poller will update to exited with actual fill price
+                        # CRITICAL: Update exit_order_id and commit IMMEDIATELY to prevent double orders
+                        # This marks the execution as "exit in progress" so other threads won't place another order
                         execution.status = 'exit_pending'
                         execution.exit_order_id = order_id
                         execution.broker_order_status = 'open'
                         execution.exit_time = datetime.utcnow()
                         execution.exit_reason = risk_event.event_type
+                        db.session.commit()  # Commit immediately to prevent race condition
 
                         # Add exit order to poller to get actual fill price (same as entry orders)
                         from app.utils.order_status_poller import order_status_poller
