@@ -94,6 +94,7 @@
                     <div class="stat-title">Multiplier</div>
                     <div class="stat-value text-lg">
                         <select id="multiplierSelect" class="select select-bordered select-sm">
+                            <option value="1.5" {% if strategy.supertrend_multiplier == 1.5 %}selected{% endif %}>1.5</option>
                             <option value="2" {% if strategy.supertrend_multiplier == 2.0 %}selected{% endif %}>2.0</option>
                             <option value="2.5" {% if strategy.supertrend_multiplier == 2.5 %}selected{% endif %}>2.5</option>
                             <option value="3" {% if not strategy.supertrend_multiplier or strategy.supertrend_multiplier == 3.0 %}selected{% endif %}>3.0</option>

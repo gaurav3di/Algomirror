@@ -99,7 +99,7 @@ def get_chart_data(strategy_id):
 
         # Get parameters - use strategy's Supertrend settings as defaults
         interval = request.args.get('interval', strategy.supertrend_timeframe or '10m')
-        days = int(request.args.get('days', 3))
+        days = int(request.args.get('days', 5))
         period = int(request.args.get('period', strategy.supertrend_period or 10))
         multiplier = float(request.args.get('multiplier', strategy.supertrend_multiplier or 3.0))
 
@@ -107,7 +107,7 @@ def get_chart_data(strategy_id):
         if interval not in ['3m', '5m', '10m', '15m']:
             interval = '5m'
         if days < 1 or days > 5:
-            days = 3
+            days = 5
 
         # Get all strategy legs
         all_legs = StrategyLeg.query.filter_by(strategy_id=strategy_id).all()
