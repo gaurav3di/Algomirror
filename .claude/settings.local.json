@@ -74,7 +74,16 @@
       "Bash(\".venv\\\\Scripts\\\\python.exe\" -m py_compile \"D:\\\\AI Bootcamp 2025\\\\Session31\\\\algomirror\\\\app\\\\strategy\\\\routes.py\")",
       "Bash(\".venv\\\\Scripts\\\\python.exe\" -m py_compile \"D:\\\\AI Bootcamp 2025\\\\Session31\\\\algomirror\\\\app\\\\models.py\")",
       "Bash(\".venv\\\\Scripts\\\\python.exe\" -m py_compile \"D:\\\\openalgo-multi\\\\algomirror\\\\app\\\\utils\\\\supertrend.py\")",
-      "Bash(\".venv\\\\Scripts\\\\python.exe\" -m py_compile \"D:\\\\openalgo-multi\\\\algomirror\\\\app\\\\tradingview\\\\routes.py\")"
+      "Bash(\".venv\\\\Scripts\\\\python.exe\" -m py_compile \"D:\\\\openalgo-multi\\\\algomirror\\\\app\\\\tradingview\\\\routes.py\")",
+      "Bash(powershell -Command:*)",
+      "Bash(taskkill:*)",
+      "Bash(sqlite3:*)",
+      "WebFetch(domain:127.0.0.1)",
+      "Bash(netstat:*)",
+      "Bash(cmd /c \"taskkill /PID 66212 /F\")",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(git rm:*)"
     ],
     "deny": [],
     "ask": []

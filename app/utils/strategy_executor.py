@@ -2672,96 +2672,99 @@ class StrategyExecutor:
         # Reverse the action
         exit_action = 'SELL' if leg_action == 'BUY' else 'BUY'
 
-        for attempt in range(max_retries):
-            try:
-                # Use freeze-aware order placement for exit orders
-                from app.utils.freeze_quantity_handler import place_order_with_freeze_check
+        # Place exit order ONCE - no internal retry loop
+        # If this fails, the external retry mechanism will handle it with proper broker verification
+        try:
+            from app.utils.freeze_quantity_handler import place_order_with_freeze_check
 
-                response = place_order_with_freeze_check(
-                    client=client,
-                    user_id=self.strategy.user_id,
-                    strategy=self.strategy.name,
-                    symbol=exec_symbol,
-                    action=exit_action,
-                    exchange=exec_exchange,
-                    price_type='MARKET',
-                    product=exec_product or self.strategy.product_order_type or 'MIS',
-                    quantity=exec_quantity
+            response = place_order_with_freeze_check(
+                client=client,
+                user_id=self.strategy.user_id,
+                strategy=self.strategy.name,
+                symbol=exec_symbol,
+                action=exit_action,
+                exchange=exec_exchange,
+                price_type='MARKET',
+                product=exec_product or self.strategy.product_order_type or 'MIS',
+                quantity=exec_quantity
+            )
+
+            logger.info(f"[EXIT] Order response for {exec_symbol}: {response}")
+
+            if response and response.get('status') == 'success':
+                # Get the exit order ID
+                exit_order_id = response.get('orderid')
+
+                # Re-fetch execution with lock to update
+                execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+
+                # Update with actual exit order ID
+                execution.exit_order_id = exit_order_id
+                execution.status = 'exited'
+
+                # Fetch exit order details to get executed price
+                order_status_response = client.orderstatus(
+                    order_id=exit_order_id,
+                    strategy=self.strategy.name
                 )
 
-                if response and response.get('status') == 'success':
-                    # Get the exit order ID
-                    exit_order_id = response.get('orderid')
+                exit_avg_price = None
+                if order_status_response.get('status') == 'success':
+                    order_data = order_status_response.get('data', {})
+                    exit_avg_price = order_data.get('average_price')
+                    execution.broker_order_status = order_data.get('order_status')
 
-                    # Re-fetch execution with lock to update
-                    execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                    # If exit price is missing/zero, wait and re-fetch
+                    if not exit_avg_price or exit_avg_price == 0:
+                        logger.warning(f"[EXIT] Exit price missing for {exec_symbol}, waiting 3s to re-fetch...")
+                        sleep(3)
 
-                    # Update with actual exit order ID
-                    execution.exit_order_id = exit_order_id
-                    execution.status = 'exited'
+                        retry_response = client.orderstatus(
+                            order_id=exit_order_id,
+                            strategy=self.strategy.name
+                        )
+                        if retry_response.get('status') == 'success':
+                            retry_data = retry_response.get('data', {})
+                            retry_exit_price = retry_data.get('average_price')
+                            if retry_exit_price and retry_exit_price > 0:
+                                exit_avg_price = retry_exit_price
 
-                    # Fetch exit order details to get executed price
-                    order_status_response = client.orderstatus(
-                        order_id=exit_order_id,
-                        strategy=self.strategy.name
-                    )
-
-                    exit_avg_price = None
-                    if order_status_response.get('status') == 'success':
-                        order_data = order_status_response.get('data', {})
-                        exit_avg_price = order_data.get('average_price')
-                        execution.broker_order_status = order_data.get('order_status')
-
-                        # If exit price is missing/zero, wait and re-fetch
-                        if not exit_avg_price or exit_avg_price == 0:
-                            logger.warning(f"[EXIT] Exit price missing for {exec_symbol}, waiting 3s to re-fetch...")
-                            sleep(3)
-
-                            retry_response = client.orderstatus(
-                                order_id=exit_order_id,
-                                strategy=self.strategy.name
-                            )
-                            if retry_response.get('status') == 'success':
-                                retry_data = retry_response.get('data', {})
-                                retry_exit_price = retry_data.get('average_price')
-                                if retry_exit_price and retry_exit_price > 0:
-                                    exit_avg_price = retry_exit_price
-
-                    # Calculate realized P&L
-                    if exit_avg_price and exit_avg_price > 0:
-                        execution.exit_price = exit_avg_price
-                        if leg_action == 'BUY':
-                            execution.realized_pnl = (exit_avg_price - exec_entry_price) * exec_quantity
-                        else:
-                            execution.realized_pnl = (exec_entry_price - exit_avg_price) * exec_quantity
+                # Calculate realized P&L
+                if exit_avg_price and exit_avg_price > 0:
+                    execution.exit_price = exit_avg_price
+                    if leg_action == 'BUY':
+                        execution.realized_pnl = (exit_avg_price - exec_entry_price) * exec_quantity
                     else:
-                        execution.realized_pnl = execution.unrealized_pnl if execution.unrealized_pnl else 0
-
-                    db.session.commit()
-                    logger.debug(f"[EXIT SUCCESS] {exec_symbol} exited, Order ID: {exit_order_id}")
-                    return True
+                        execution.realized_pnl = (exec_entry_price - exit_avg_price) * exec_quantity
                 else:
-                    error_msg = response.get('message', 'Unknown') if response else 'No response'
-                    logger.warning(f"[EXIT] Attempt {attempt + 1}/{max_retries} failed for {exec_symbol}: {error_msg}")
+                    execution.realized_pnl = execution.unrealized_pnl if execution.unrealized_pnl else 0
 
-            except Exception as e:
-                logger.warning(f"[EXIT] Attempt {attempt + 1}/{max_retries} exception for {exec_symbol}: {e}")
+                db.session.commit()
+                logger.debug(f"[EXIT SUCCESS] {exec_symbol} exited, Order ID: {exit_order_id}")
+                return True
+            else:
+                error_msg = response.get('message', 'Unknown') if response else 'No response'
+                logger.warning(f"[EXIT] Order failed for {exec_symbol}: {error_msg}")
 
-            if attempt < max_retries - 1:
-                sleep(retry_delay)
-                retry_delay *= 2
+        except Exception as e:
+            logger.warning(f"[EXIT] Exception for {exec_symbol}: {e}")
 
-        # RELIABILITY FIX: Revert status to 'entered' so retry can pick it up
+        # DUPLICATE PREVENTION: Keep status as 'exit_pending' on failure
+        # Do NOT revert to 'entered' - this prevents duplicate exit orders
+        # The external retry mechanism will verify with broker before placing another order
         try:
             execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
             if execution and execution.status == 'exit_pending' and not execution.exit_order_id:
-                execution.status = 'entered'
-                execution.exit_reason = f"failed: after {max_retries} attempts"
-                execution.exit_time = None
+                # Keep status as exit_pending, set retry timer
+                from datetime import timedelta
+                execution.exit_retry_after = datetime.utcnow() + timedelta(seconds=10)
+                execution.exit_attempt_count = (execution.exit_attempt_count or 0) + 1
+                execution.error_message = "Exit order failed - will retry with broker verification"
                 db.session.commit()
+                logger.warning(f"[EXIT] {exec_symbol} exit failed - marked for retry after 10s")
         except Exception as e:
-            logger.error(f"[EXIT] Failed to revert status for {exec_id}: {e}")
+            logger.error(f"[EXIT] Failed to update retry status for {exec_id}: {e}")
             db.session.rollback()
 
-        logger.error(f"[EXIT FAILED] {exec_symbol} failed after {max_retries} attempts")
+        logger.error(f"[EXIT FAILED] {exec_symbol} failed - will retry with broker verification")
         return False

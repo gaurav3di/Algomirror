@@ -1065,16 +1065,33 @@ class RiskManager:
                 logger.error(f"[CLOSE_POSITIONS] Failed to verify broker positions: {verify_error}")
                 # Continue with close anyway
 
-            # Get all open executions with IMPROVED FILTERS:
-            # - status='entered' (not already exiting/exited)
-            # - exit_order_id IS NULL (no exit order placed yet)
-            # - quantity > 0 (has something to close)
-            open_executions = StrategyExecution.query.filter(
-                StrategyExecution.strategy_id == strategy.id,
-                StrategyExecution.status == 'entered',
-                StrategyExecution.exit_order_id.is_(None),  # No exit order yet
-                StrategyExecution.quantity > 0  # Has quantity to close
-            ).all()
+            # Get executions to close based on event type:
+            # - For FIRST TRIGGER (max_loss, max_profit, trailing_sl): status='entered'
+            # - For RETRY events (_retry suffix): status='entered' OR 'exit_pending' (without exit_order_id)
+            # Both cases require: exit_order_id IS NULL and quantity > 0
+            is_retry_event = risk_event.event_type.endswith('_retry')
+
+            if is_retry_event:
+                # Retry: Include both 'entered' and 'exit_pending' without exit_order_id
+                from sqlalchemy import or_
+                open_executions = StrategyExecution.query.filter(
+                    StrategyExecution.strategy_id == strategy.id,
+                    or_(
+                        StrategyExecution.status == 'entered',
+                        StrategyExecution.status == 'exit_pending'
+                    ),
+                    StrategyExecution.exit_order_id.is_(None),  # No exit order yet
+                    StrategyExecution.quantity > 0  # Has quantity to close
+                ).all()
+                logger.info(f"[CLOSE_POSITIONS] Retry event: querying for 'entered' OR 'exit_pending' executions")
+            else:
+                # First trigger: Only 'entered' positions
+                open_executions = StrategyExecution.query.filter(
+                    StrategyExecution.strategy_id == strategy.id,
+                    StrategyExecution.status == 'entered',
+                    StrategyExecution.exit_order_id.is_(None),  # No exit order yet
+                    StrategyExecution.quantity > 0  # Has quantity to close
+                ).all()
 
             if not open_executions:
                 logger.warning(f"[CLOSE_POSITIONS] No open positions found for {strategy.name}")
@@ -1228,11 +1245,6 @@ class RiskManager:
 
                     logger.debug(f"[RISK EXIT] Placing {exit_transaction} order for {exec_symbol}, qty={exec_quantity} on {account.account_name}")
 
-                    # Place exit order with freeze-aware placement and retry logic
-                    max_retries = 3
-                    retry_delay = 1
-                    response = None
-
                     # Get product type - prefer execution's product, fallback to strategy's product_order_type
                     # This ensures NRML entries exit as NRML, not MIS
                     exit_product = exec_product or strategy.product_order_type or 'MIS'
@@ -1242,43 +1254,29 @@ class RiskManager:
                     logger.info(f"[RISK EXIT] ORDER PARAMS: symbol={exec_symbol}, action={exit_transaction}, qty={exec_quantity}, exchange={exec_exchange}, product={exit_product}")
                     print(f"[RISK EXIT] Placing order: {exit_transaction} {exec_quantity} {exec_symbol} on {account.account_name}")
 
-                    for attempt in range(max_retries):
-                        try:
-                            response = place_order_with_freeze_check(
-                                client=client,
-                                user_id=strategy.user_id,
-                                strategy=strategy.name,
-                                symbol=exec_symbol,
-                                exchange=exec_exchange,
-                                action=exit_transaction,
-                                quantity=exec_quantity,
-                                price_type='MARKET',
-                                product=exit_product
-                            )
-                            # Log the full response for debugging
-                            logger.info(f"[RISK EXIT] Order response for {exec_symbol}: {response}")
-                            print(f"[RISK EXIT] Response for {exec_symbol}: {response}")
-                            # FIXED: Only break on SUCCESS, not on any dict response
-                            if response and isinstance(response, dict) and response.get('status') == 'success':
-                                break
-                            elif response and isinstance(response, dict):
-                                # API returned error, log and retry
-                                error_msg = response.get('message', 'Unknown error')
-                                logger.warning(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} API error for {exec_symbol}: {error_msg}")
-                                print(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} API ERROR: {error_msg}")
-                                if attempt < max_retries - 1:
-                                    import time
-                                    time.sleep(retry_delay)
-                                    retry_delay *= 2
-                        except Exception as api_error:
-                            logger.warning(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} failed for {exec_symbol} on {account.account_name}: {api_error}")
-                            print(f"[RISK EXIT] Attempt {attempt + 1}/{max_retries} FAILED: {api_error}")
-                            if attempt < max_retries - 1:
-                                import time
-                                time.sleep(retry_delay)
-                                retry_delay *= 2
-                            else:
-                                response = {'status': 'error', 'message': f'API error after {max_retries} retries: {api_error}'}
+                    # Place exit order ONCE - no internal retry loop
+                    # If this fails, the external retry mechanism (10 seconds later) will handle it
+                    # with proper broker verification to prevent duplicate orders
+                    response = None
+                    try:
+                        response = place_order_with_freeze_check(
+                            client=client,
+                            user_id=strategy.user_id,
+                            strategy=strategy.name,
+                            symbol=exec_symbol,
+                            exchange=exec_exchange,
+                            action=exit_transaction,
+                            quantity=exec_quantity,
+                            price_type='MARKET',
+                            product=exit_product
+                        )
+                        # Log the full response for debugging
+                        logger.info(f"[RISK EXIT] Order response for {exec_symbol}: {response}")
+                        print(f"[RISK EXIT] Response for {exec_symbol}: {response}")
+                    except Exception as api_error:
+                        logger.warning(f"[RISK EXIT] API error for {exec_symbol} on {account.account_name}: {api_error}")
+                        print(f"[RISK EXIT] API ERROR: {exec_symbol} - {api_error}")
+                        response = {'status': 'error', 'message': f'API error: {api_error}'}
 
                     # Re-fetch execution with lock to update order ID
                     execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)

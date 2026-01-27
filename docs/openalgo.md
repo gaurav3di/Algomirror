@@ -35,7 +35,7 @@ openalgo.__version__
 
 ### Examples
 
-Please refer to the documentation on [order constants](../api-documentation/v1/order-constants), and consult the API reference for details on optional parameters
+Please refer to the documentation on [order constants](https://docs.openalgo.in/api-documentation/v1/order-constants), and consult the API reference for details on optional parameters
 
 ### PlaceOrder example
 
@@ -108,6 +108,238 @@ Place Smart Market Order Response
 
 ```json
 {'orderid': '250408000997543', 'status': 'success'}
+```
+
+### OptionsOrder Example
+
+To place ATM options order
+
+```python
+response = client.optionsorder(
+      strategy="python",
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="28OCT25",
+      offset="ATM",
+      option_type="CE",
+      action="BUY",
+      quantity=75,
+      pricetype="MARKET",
+      product="NRML",
+      splitsize = 0
+  )
+
+print(response)
+```
+
+Place Options Order Response
+
+```json
+{
+  "exchange": "NFO",
+  "offset": "ATM",
+  "option_type": "CE",
+  "orderid": "25102800000006",
+  "status": "success",
+  "symbol": "NIFTY28OCT2525950CE",
+  "underlying": "NIFTY28OCT25FUT",
+  "underlying_ltp": 25966.05
+}
+```
+
+To place ITM options order
+
+```python
+response = client.optionsorder(
+      strategy="python",
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="28OCT25",
+      offset="ITM4",
+      option_type="PE",
+      action="BUY",
+      quantity=75,
+      pricetype="MARKET",
+      product="NRML",
+      splitsize = 0
+  )
+
+print(response)
+```
+
+Place Options Order Response
+
+```json
+{
+  "exchange": "NFO",
+  "offset": "ITM4",
+  "option_type": "PE",
+  "orderid": "25102800000007",
+  "status": "success",
+  "symbol": "NIFTY28OCT2526150PE",
+  "underlying": "NIFTY28OCT25FUT",
+  "underlying_ltp": 25966.05
+}
+```
+
+To place OTM options order
+
+```python
+response = client.optionsorder(
+      strategy="python",
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="28OCT25",
+      offset="OTM5",
+      option_type="CE",
+      action="BUY",
+      quantity=75,
+      pricetype="MARKET",
+      product="NRML",
+      splitsize = 0
+  )
+
+print(response)
+```
+
+Place Options Order Response
+
+```json
+{
+  "exchange": "NFO",
+  "mode": "analyze",
+  "offset": "OTM5",
+  "option_type": "CE",
+  "orderid": "25102800000008",
+  "status": "success",
+  "symbol": "NIFTY28OCT2526200CE",
+  "underlying": "NIFTY28OCT25FUT",
+  "underlying_ltp": 25966.05
+}
+```
+
+### OptionsMultiOrder Example
+
+To place Iron options order (Same Expiry)
+
+```python
+response = client.optionsmultiorder(
+    strategy="Iron Condor Test",
+    underlying="NIFTY",
+    exchange="NSE_INDEX",
+    expiry_date="25NOV25",
+    legs=[
+        {"offset": "OTM6", "option_type": "CE", "action": "BUY", "quantity": 75},
+        {"offset": "OTM6", "option_type": "PE", "action": "BUY", "quantity": 75},
+        {"offset": "OTM4", "option_type": "CE", "action": "SELL", "quantity": 75},
+        {"offset": "OTM4", "option_type": "PE", "action": "SELL", "quantity": 75}
+    ]
+)
+
+print(response)
+```
+
+Place OptionsMultiOrder Response
+
+```json
+{
+    'status': 'success',
+    'underlying': 'NIFTY',
+    'underlying_ltp': 26050.45,
+    'results': [
+        {
+            'action': 'BUY',
+            'leg': 1,
+            'mode': 'analyze',
+            'offset': 'OTM6',
+            'option_type': 'CE',
+            'orderid': '25111996859688',
+            'status': 'success',
+            'symbol': 'NIFTY25NOV2526350CE'
+        },
+        {
+            'action': 'BUY',
+            'leg': 2,
+            'mode': 'analyze',
+            'offset': 'OTM6',
+            'option_type': 'PE',
+            'orderid': '25111996042210',
+            'status': 'success',
+            'symbol': 'NIFTY25NOV2525750PE'
+        },
+        {
+            'action': 'SELL',
+            'leg': 3,
+            'mode': 'analyze',
+            'offset': 'OTM4',
+            'option_type': 'CE',
+            'orderid': '25111922189638',
+            'status': 'success',
+            'symbol': 'NIFTY25NOV2526250CE'
+        },
+        {
+            'action': 'SELL',
+            'leg': 4,
+            'mode': 'analyze',
+            'offset': 'OTM4',
+            'option_type': 'PE',
+            'orderid': '25111919252668',
+            'status': 'success',
+            'symbol': 'NIFTY25NOV2525850PE'
+        }
+    ]
+}
+
+```
+
+To place Diagonal Spread options order (Different Expiry)
+
+```python
+response = client.optionsmultiorder(
+      strategy="Diagonal Spread Test",
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      legs=[
+          {"offset": "ITM2", "option_type": "CE", "action": "BUY", "quantity": 75, "expiry_date": "30DEC25"},
+          {"offset": "OTM2", "option_type": "CE", "action": "SELL", "quantity": 75, "expiry_date": "25NOV25"}
+      ]
+  )
+
+print(response)
+
+```
+
+Place OptionsMultiOrder Response
+
+```json
+{
+    "results": [
+        {
+            "action": "BUY",
+            "leg": 1,
+            "mode": "analyze",
+            "offset": "ITM2",
+            "option_type": "CE",
+            "orderid": "25111933337854",
+            "status": "success",
+            "symbol": "NIFTY30DEC2525950CE"
+        },
+        {
+            "action": "SELL",
+            "leg": 2,
+            "mode": "analyze",
+            "offset": "OTM2",
+            "option_type": "CE",
+            "orderid": "25111957475473",
+            "status": "success",
+            "symbol": "NIFTY25NOV2526150CE"
+        }
+    ],
+    "status": "success",
+    "underlying": "NIFTY",
+    "underlying_ltp": 26052.65
+}
+
 ```
 
 ### BasketOrder example
@@ -320,7 +552,7 @@ To Get the Current OrderStatus
 
 ```python
 response = client.orderstatus(
-    order_id="250408000989443",
+    order_id="250828000185002",
     strategy="Test Strategy"
     )
 print(response)
@@ -330,22 +562,22 @@ print(response)
 
 ```json
 {
-  "status": "success",
   "data": {
-    "orderid": "250408000989443",
-    "symbol": "RELIANCE",
-    "exchange": "NSE",
     "action": "BUY",
+    "average_price": 18.95,
+    "exchange": "NSE",
     "order_status": "complete",
-    "quantity": "1",
-    "price": 1186.0,
+    "orderid": "250828000185002",
+    "price": 0,
     "pricetype": "MARKET",
-    "trigger_price": 0.0,
     "product": "MIS",
-    "timestamp": "08-Apr-2025 13:58:03"
-  }
+    "quantity": "1",
+    "symbol": "YESBANK",
+    "timestamp": "28-Aug-2025 09:59:10",
+    "trigger_price": 0
+  },
+  "status": "success"
 }
-
 ```
 
 ### OpenPosition Example
@@ -391,6 +623,74 @@ print(response)
     "volume": 14414545
   }
 }
+```
+
+### MultiQuotes Example
+
+```python
+response = client.multiquotes(symbols=[
+    {"symbol": "RELIANCE", "exchange": "NSE"},
+    {"symbol": "TCS", "exchange": "NSE"},
+    {"symbol": "INFY", "exchange": "NSE"}
+])
+
+print(response)
+```
+
+**Quotes response**
+
+```json
+{
+  "status": "success",
+  "results": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "data": {
+        "open": 1542.3,
+        "high": 1571.6,
+        "low": 1540.5,
+        "ltp": 1569.9,
+        "prev_close": 1539.7,
+        "ask": 1569.9,
+        "bid": 0,
+        "oi": 0,
+        "volume": 14054299
+      }
+    },
+    {
+      "symbol": "TCS",
+      "exchange": "NSE",
+      "data": {
+        "open": 3118.8,
+        "high": 3178,
+        "low": 3117,
+        "ltp": 3162.9,
+        "prev_close": 3119.2,
+        "ask": 0,
+        "bid": 3162.9,
+        "oi": 0,
+        "volume": 2508527
+      }
+    },
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "data": {
+        "open": 1532.1,
+        "high": 1560.3,
+        "low": 1532.1,
+        "ltp": 1557.9,
+        "prev_close": 1530.6,
+        "ask": 0,
+        "bid": 1557.9,
+        "oi": 0,
+        "volume": 7575038
+      }
+    }
+  ]
+}
+
 ```
 
 ### Depth Example
@@ -520,12 +820,205 @@ print(response)
 }
 ```
 
+### OptionChain Example
+
+Note : To fetch entire option chain for a expiry remove the strike\_count (optional) parameter
+
+```python
+chain = client.optionchain(
+    underlying="NIFTY",
+    exchange="NSE_INDEX",
+    expiry_date="30DEC25",
+    strike_count=10
+)
+```
+
+**Symbols Response**
+
+```json
+{
+    "status": "success",
+    "underlying": "NIFTY",
+    "underlying_ltp": 26215.55,
+    "expiry_date": "30DEC25",
+    "atm_strike": 26200.0,
+    "chain": [
+        {
+            "strike": 26100.0,
+            "ce": {
+                "symbol": "NIFTY30DEC2526100CE",
+                "label": "ITM2",
+                "ltp": 490,
+                "bid": 490,
+                "ask": 491,
+                "open": 540,
+                "high": 571,
+                "low": 444.75,
+                "prev_close": 496.8,
+                "volume": 1195800,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            },
+            "pe": {
+                "symbol": "NIFTY30DEC2526100PE",
+                "label": "OTM2",
+                "ltp": 193,
+                "bid": 191.2,
+                "ask": 193,
+                "open": 204.1,
+                "high": 229.95,
+                "low": 175.6,
+                "prev_close": 215.95,
+                "volume": 1832700,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            }
+        },
+        {
+            "strike": 26150.0,
+            "ce": {
+                "symbol": "NIFTY30DEC2526150CE",
+                "label": "ITM1",
+                "ltp": 460.5,
+                "bid": 452.9,
+                "ask": 463,
+                "open": 475.8,
+                "high": 535.7,
+                "low": 414.6,
+                "prev_close": 461.05,
+                "volume": 183525,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            },
+            "pe": {
+                "symbol": "NIFTY30DEC2526150PE",
+                "label": "OTM1",
+                "ltp": 208.5,
+                "bid": 207.85,
+                "ask": 210.1,
+                "open": 218.2,
+                "high": 248.8,
+                "low": 190.75,
+                "prev_close": 233.7,
+                "volume": 332100,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            }
+        },
+        {
+            "strike": 26200.0,
+            "ce": {
+                "symbol": "NIFTY30DEC2526200CE",
+                "label": "ATM",
+                "ltp": 427,
+                "bid": 425.05,
+                "ask": 427,
+                "open": 449.95,
+                "high": 503.5,
+                "low": 384,
+                "prev_close": 433.2,
+                "volume": 2994000,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            },
+            "pe": {
+                "symbol": "NIFTY30DEC2526200PE",
+                "label": "ATM",
+                "ltp": 227.4,
+                "bid": 227.35,
+                "ask": 228.5,
+                "open": 251.9,
+                "high": 269.15,
+                "low": 205.95,
+                "prev_close": 251.9,
+                "volume": 3745350,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            }
+        },
+        {
+            "strike": 26250.0,
+            "ce": {
+                "symbol": "NIFTY30DEC2526250CE",
+                "label": "OTM1",
+                "ltp": 398,
+                "bid": 395.4,
+                "ask": 400.5,
+                "open": 442.1,
+                "high": 468.5,
+                "low": 355.75,
+                "prev_close": 401.9,
+                "volume": 407100,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            },
+            "pe": {
+                "symbol": "NIFTY30DEC2526250PE",
+                "label": "ITM1",
+                "ltp": 243.85,
+                "bid": 243.6,
+                "ask": 246.15,
+                "open": 264.25,
+                "high": 288,
+                "low": 222.15,
+                "prev_close": 269.7,
+                "volume": 487575,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            }
+        },
+        {
+            "strike": 26300.0,
+            "ce": {
+                "symbol": "NIFTY30DEC2526300CE",
+                "label": "OTM2",
+                "ltp": 367.55,
+                "bid": 364,
+                "ask": 367.55,
+                "open": 378,
+                "high": 437.4,
+                "low": 327.25,
+                "prev_close": 371.45,
+                "volume": 2416350,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            },
+            "pe": {
+                "symbol": "NIFTY30DEC2526300PE",
+                "label": "ITM2",
+                "ltp": 266,
+                "bid": 264.2,
+                "ask": 266.5,
+                "open": 263.1,
+                "high": 311.55,
+                "low": 240,
+                "prev_close": 289.85,
+                "volume": 2891100,
+                "oi": 0,
+                "lotsize": 75,
+                "tick_size": 0.05
+            }
+        }
+    ]
+}
+
+```
+
 ### Symbol Example
 
 ```python
 response = client.symbol(
-            symbol="RELIANCE",
-            exchange="NSE"
+            symbol="NIFTY30DEC25FUT",
+            exchange="NFO"
             )
 print(response)
 ```
@@ -534,28 +1027,29 @@ print(response)
 
 ```json
 {
-  "status": "success",
   "data": {
-    "id": 979,
-    "name": "RELIANCE",
-    "symbol": "RELIANCE",
-    "brsymbol": "RELIANCE-EQ",
-    "exchange": "NSE",
-    "brexchange": "NSE",
-    "instrumenttype": "",
-    "expiry": "",
-    "strike": -0.01,
-    "lotsize": 1,
-    "tick_size": 0.05,
-    "token": "2885"
-  }
+    "brexchange": "NSE_FO",
+    "brsymbol": "NIFTY FUT 30 DEC 25",
+    "exchange": "NFO",
+    "expiry": "30-DEC-25",
+    "freeze_qty": 1800,
+    "id": 57900,
+    "instrumenttype": "FUT",
+    "lotsize": 75,
+    "name": "NIFTY",
+    "strike": 0,
+    "symbol": "NIFTY30DEC25FUT",
+    "tick_size": 10,
+    "token": "NSE_FO|49543"
+  },
+  "status": "success"
 }
 ```
 
 ### Search Example
 
 ```python
-response = client.search(query="NIFTY 25000 JUL CE",exchange="NFO")
+response = client.search(query="NIFTY 26000 DEC CE",exchange="NFO")
 print(response)
 ```
 
@@ -565,47 +1059,255 @@ print(response)
 {
   "data": [
     {
-      "brexchange": "NFO",
-      "brsymbol": "NIFTY17JUL2525000CE",
+      "brexchange": "NSE_FO",
+      "brsymbol": "NIFTY 26000 CE 30 DEC 25",
       "exchange": "NFO",
-      "expiry": "17-JUL-25",
-      "instrumenttype": "OPTIDX",
+      "expiry": "30-DEC-25",
+      "freeze_qty": 1800,
+      "instrumenttype": "CE",
       "lotsize": 75,
       "name": "NIFTY",
-      "strike": 25000,
-      "symbol": "NIFTY17JUL2525000CE",
-      "tick_size": 0.05,
-      "token": "47275"
+      "strike": 26000,
+      "symbol": "NIFTY30DEC2526000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|71399"
     },
     {
-      "brexchange": "NFO",
-      "brsymbol": "FINNIFTY31JUL2525000CE",
+      "brexchange": "NSE_FO",
+      "brsymbol": "NIFTY 26000 CE 29 DEC 26",
       "exchange": "NFO",
-      "expiry": "31-JUL-25",
-      "instrumenttype": "OPTIDX",
+      "expiry": "29-DEC-26",
+      "freeze_qty": 1800,
+      "instrumenttype": "CE",
+      "lotsize": 75,
+      "name": "NIFTY",
+      "strike": 26000,
+      "symbol": "NIFTY29DEC2626000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|71505"
+    },
+    {
+      "brexchange": "NSE_FO",
+      "brsymbol": "NIFTY 26000 CE 26 DEC 28",
+      "exchange": "NFO",
+      "expiry": "26-DEC-28",
+      "freeze_qty": 1800,
+      "instrumenttype": "CE",
+      "lotsize": 75,
+      "name": "NIFTY",
+      "strike": 26000,
+      "symbol": "NIFTY26DEC2826000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|67786"
+    },
+    {
+      "brexchange": "NSE_FO",
+      "brsymbol": "NIFTY 26000 CE 28 DEC 27",
+      "exchange": "NFO",
+      "expiry": "28-DEC-27",
+      "freeze_qty": 1800,
+      "instrumenttype": "CE",
+      "lotsize": 75,
+      "name": "NIFTY",
+      "strike": 26000,
+      "symbol": "NIFTY28DEC2726000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|53628"
+    },
+    {
+      "brexchange": "NSE_FO",
+      "brsymbol": "FINNIFTY 26000 CE 30 DEC 25",
+      "exchange": "NFO",
+      "expiry": "30-DEC-25",
+      "freeze_qty": 1200,
+      "instrumenttype": "CE",
       "lotsize": 65,
       "name": "FINNIFTY",
-      "strike": 25000,
-      "symbol": "FINNIFTY31JUL2525000CE",
-      "tick_size": 0.05,
-      "token": "54763"
+      "strike": 26000,
+      "symbol": "FINNIFTY30DEC2526000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|61709"
     },
     {
-      "brexchange": "NFO",
-      "brsymbol": "NIFTY24JUL2525000CE",
+      "brexchange": "NSE_FO",
+      "brsymbol": "NIFTY 26000 CE 24 DEC 29",
       "exchange": "NFO",
-      "expiry": "24-JUL-25",
-      "instrumenttype": "OPTIDX",
+      "expiry": "24-DEC-29",
+      "freeze_qty": 1800,
+      "instrumenttype": "CE",
       "lotsize": 75,
       "name": "NIFTY",
-      "strike": 25000,
-      "symbol": "NIFTY24JUL2525000CE",
-      "tick_size": 0.05,
-      "token": "49487"
+      "strike": 26000,
+      "symbol": "NIFTY24DEC2926000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|61778"
+    },
+    {
+      "brexchange": "NSE_FO",
+      "brsymbol": "NIFTY 26000 CE 23 DEC 25",
+      "exchange": "NFO",
+      "expiry": "23-DEC-25",
+      "freeze_qty": 1800,
+      "instrumenttype": "CE",
+      "lotsize": 75,
+      "name": "NIFTY",
+      "strike": 26000,
+      "symbol": "NIFTY23DEC2526000CE",
+      "tick_size": 5,
+      "token": "NSE_FO|57005"
     }
   ],
-  "message": "Found 6 matching symbols",
+  "message": "Found 7 matching symbols",
   "status": "success"
+}
+```
+
+### OptionSymbol Example
+
+ATM Option
+
+```python
+response = client.optionsymbol(
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="30DEC25",
+      offset="ATM",
+      option_type="CE"
+  )
+
+print(response)
+```
+
+**OptionSymbol Response**
+
+```json
+{
+  "status": "success",
+  "symbol": "NIFTY30DEC2525950CE",
+  "exchange": "NFO",
+  "lotsize": 75,
+  "tick_size": 5,
+  "freeze_qty": 1800,
+  "underlying_ltp": 25966.4
+}
+```
+
+ITM Option
+
+```python
+response = client.optionsymbol(
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="30DEC25",
+      offset="ITM3",
+      option_type="PE"
+  )
+
+print(response)
+```
+
+**OptionSymbol Response**
+
+```json
+{
+  "status": "success",
+  "symbol": "NIFTY30DEC2526100PE",
+  "exchange": "NFO",
+  "lotsize": 75,
+  "tick_size": 5,
+  "freeze_qty": 1800,
+  "underlying_ltp": 25966.4
+}
+```
+
+OTM Option
+
+```python
+response = client.optionsymbol(
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="30DEC25",
+      offset="OTM4",
+      option_type="CE"
+  )
+
+print(response)
+```
+
+**OptionSymbol Response**
+
+```json
+{
+  "status": "success",
+  "symbol": "NIFTY30DEC2526150CE",
+  "exchange": "NFO",
+  "lotsize": 75,
+  "tick_size": 5,
+  "freeze_qty": 1800,
+  "underlying_ltp": 25966.4
+}
+```
+
+### SyntheticFuture Example
+
+```python
+response = client.syntheticfuture(
+      underlying="NIFTY",
+      exchange="NSE_INDEX",
+      expiry_date="25NOV25"
+  )
+
+print(response)
+```
+
+SyntheticFuture **Response**
+
+```
+{
+ 'atm_strike': 25900.0,
+ 'expiry': '25NOV25',
+ 'status': 'success',
+ 'synthetic_future_price': 25980.05,
+ 'underlying': 'NIFTY',
+ 'underlying_ltp': 25910.05
+}
+```
+
+### OptionGreeks Example
+
+```python
+response = client.optiongreeks(
+      symbol="NIFTY25NOV2526000CE",
+      exchange="NFO",
+      interest_rate=0.00,
+      underlying_symbol="NIFTY",
+      underlying_exchange="NSE_INDEX"
+  )
+
+print(response)
+```
+
+OptionGreeks  **Response**
+
+```
+{
+'days_to_expiry': 28.5071,
+ 'exchange': 'NFO',
+ 'expiry_date': '25-Nov-2025',
+ 'greeks': {'delta': 0.4967,
+  'gamma': 0.000352,
+  'rho': 9.733994,
+  'theta': -7.919,
+  'vega': 28.9489},
+ 'implied_volatility': 15.6,
+ 'interest_rate': 0.0,
+ 'option_price': 435,
+ 'option_type': 'CE',
+ 'spot_price': 25966.05,
+ 'status': 'success',
+ 'strike': 26000.0,
+ 'symbol': 'NIFTY25NOV2526000CE',
+ 'underlying': 'NIFTY'
 }
 ```
 
@@ -646,14 +1348,58 @@ response
  'status': 'success'}
 ```
 
+### Instruments Example
+
+```python
+response = client.instruments(exchange="NSE")
+
+print(response.tail())
+```
+
+Instruments **Response**
+
+```json
+     brexchange           brsymbol exchange expiry instrumenttype  lotsize  \
+3041        NSE      NSE:NEOGEN-EQ      NSE   None             EQ        1   
+3042        NSE     NSE:ALANKIT-EQ      NSE   None             EQ        1   
+3043        NSE  NSE:EVERESTIND-EQ      NSE   None             EQ        1   
+3044        NSE   NSE:VIKASLIFE-EQ      NSE   None             EQ        1   
+3045        NSE    NSE:ONEPOINT-EQ      NSE   None             EQ        1   
+
+                          name  strike      symbol  tick_size           token  
+3041  NEOGEN CHEMICALS LIMITED    -1.0      NEOGEN       0.10  10100000009917  
+3042           ALANKIT LIMITED    -1.0     ALANKIT       0.01  10100000009921  
+3043    EVEREST INDUSTRIES LTD    -1.0  EVERESTIND       0.05   1010000000993  
+3044    VIKAS LIFECARE LIMITED    -1.0   VIKASLIFE       0.01  10100000009931  
+3045     ONE POINT ONE SOL LTD    -1.0    ONEPOINT       0.01  10100000009939  
+```
+
+### Telegram Alert Example
+
+```python
+response = client.telegram(
+      username="<openalgo_loginid>",
+      message="NIFTY crossed 26000!"
+  )
+
+print(response)
+```
+
+**Telegram Alert Response**
+
+```json
+{
+  "message": "Notification sent successfully",
+  "status": "success"
+}
+```
+
 ### Funds Example
 
 ```python
 response = client.funds()
 print(response)
 ```
-
-
 
 **Funds Response**
 
@@ -669,6 +1415,42 @@ print(response)
   }
 }
 
+```
+
+### Margin Example
+
+```python
+response = client.margin(positions=[
+      {
+          "symbol": "NIFTY25NOV2525000CE",
+          "exchange": "NFO",
+          "action": "BUY",
+          "product": "NRML",
+          "pricetype": "MARKET",
+          "quantity": "75"
+      },
+      {
+          "symbol": "NIFTY25NOV2525500CE",
+          "exchange": "NFO",
+          "action": "SELL",
+          "product": "NRML",
+          "pricetype": "MARKET",
+          "quantity": "75"
+      }
+  ])
+```
+
+**Margin Response**
+
+```json
+{
+    "status": "success",
+    "data": {
+      "total_margin_required": 91555.7625,
+      "span_margin": 0.0,
+      "exposure_margin": 91555.7625
+    }
+}
 ```
 
 ### OrderBook Example
@@ -855,6 +1637,71 @@ Holdings Response
   }
 }
 
+```
+
+### Holidays Example
+
+```python
+response = client.holidays(year=2026)
+print(response)
+```
+
+#### Holidays Response
+
+```json
+{'data': [
+    {'closed_exchanges': ['NSE', 'BSE', 'NFO', 'BFO', 'CDS', 'BCD', 'MCX'
+      ], 'date': '2026-01-26', 'description': 'Republic Day', 'holiday_type': 'TRADING_HOLIDAY', 'open_exchanges': []
+    },
+    {'closed_exchanges': [], 'date': '2026-02-19', 'description': 'Chhatrapati Shivaji Maharaj Jayanti', 'holiday_type': 'SETTLEMENT_HOLIDAY', 'open_exchanges': []
+    },
+    {'closed_exchanges': ['NSE', 'BSE', 'NFO', 'BFO', 'CDS', 'BCD'
+      ], 'date': '2026-03-10', 'description': 'Holi', 'holiday_type': 'TRADING_HOLIDAY', 'open_exchanges': [
+        {'end_time': 1741677900000, 'exchange': 'MCX', 'start_time': 1741624200000
+        }
+      ]
+    },
+    {'closed_exchanges': ['NSE', 'BSE', 'NFO', 'BFO', 'CDS', 'BCD'
+      ], 'date': '2026-03-20', 'description': 'Id-Ul-Fitr (Ramadan)', 'holiday_type': 'TRADING_HOLIDAY', 'open_exchanges': [
+        {'end_time': 1742541900000, 'exchange': 'MCX', 'start_time': 1742488200000
+        }
+      ]
+    },
+    {'closed_exchanges': ['NSE', 'BSE', 'NFO', 'BFO', 'CDS', 'BCD'
+      ], 'date': '2026-03-25', 'description': 'Holi (Dhuleti)', 'holiday_type': 'TRADING_HOLIDAY', 'open_exchanges': [
+        {'end_time': 1742973900000, 'exchange': 'MCX', 'start_time': 1742920200000
+        }
+      ]
+    }
+```
+
+### Timings Example
+
+```python
+response = client.timings(date="2025-12-19")
+print(response)
+```
+
+#### Timings Response
+
+```json
+{'data': [
+    {'end_time': 1766138400000, 'exchange': 'NSE', 'start_time': 1766115900000
+    },
+    {'end_time': 1766138400000, 'exchange': 'BSE', 'start_time': 1766115900000
+    },
+    {'end_time': 1766138400000, 'exchange': 'NFO', 'start_time': 1766115900000
+    },
+    {'end_time': 1766138400000, 'exchange': 'BFO', 'start_time': 1766115900000
+    },
+    {'end_time': 1766168700000, 'exchange': 'MCX', 'start_time': 1766115000000
+    },
+    {'end_time': 1766143800000, 'exchange': 'BCD', 'start_time': 1766115000000
+    },
+    {'end_time': 1766143800000, 'exchange': 'CDS', 'start_time': 1766115000000
+    }
+  ], 'status': 'success'
+}
 ```
 
 ### Analyzer Status Example

@@ -605,13 +605,31 @@ class SupertrendExitService:
                 strategy.supertrend_exit_triggered_at = get_ist_now()
                 db.session.commit()  # Commit and release lock - other calls will now see triggered=True
 
-                # Get all open positions that don't already have exit orders
-                open_executions = StrategyExecution.query.filter_by(
-                    strategy_id=strategy.id,
-                    status='entered'
-                ).filter(
-                    StrategyExecution.exit_order_id.is_(None)
-                ).all()
+                # Get executions to close based on trigger type:
+                # - For FIRST TRIGGER: status='entered'
+                # - For RETRY events (contains 'RETRY'): status='entered' OR 'exit_pending' (without exit_order_id)
+                is_retry_event = 'RETRY' in exit_reason.upper()
+
+                if is_retry_event:
+                    # Retry: Include both 'entered' and 'exit_pending' without exit_order_id
+                    from sqlalchemy import or_
+                    open_executions = StrategyExecution.query.filter(
+                        StrategyExecution.strategy_id == strategy.id,
+                        or_(
+                            StrategyExecution.status == 'entered',
+                            StrategyExecution.status == 'exit_pending'
+                        ),
+                        StrategyExecution.exit_order_id.is_(None)
+                    ).all()
+                    logger.info(f"[SUPERTREND EXIT] Retry event: querying for 'entered' OR 'exit_pending' executions")
+                else:
+                    # First trigger: Only 'entered' positions
+                    open_executions = StrategyExecution.query.filter_by(
+                        strategy_id=strategy.id,
+                        status='entered'
+                    ).filter(
+                        StrategyExecution.exit_order_id.is_(None)
+                    ).all()
 
                 # Filter out rejected/cancelled
                 open_executions = [
@@ -741,42 +759,28 @@ class SupertrendExitService:
 
                         logger.info(f"[SUPERTREND EXIT] Placing exit for {exec_symbol} on {account.account_name}, action={exit_action}, qty={exec_quantity}, product={exit_product}")
 
-                        # Place order using freeze quantity handler with retry mechanism
+                        # Place exit order ONCE - no internal retry loop
+                        # If this fails, the external retry mechanism (10 seconds later) will handle it
+                        # with proper broker verification to prevent duplicate orders
                         from app.utils.freeze_quantity_handler import place_order_with_freeze_check
-                        import time as time_module
 
-                        max_retries = 3
-                        retry_delay = 1
                         response = None
-
-                        for attempt in range(max_retries):
-                            try:
-                                response = place_order_with_freeze_check(
-                                    client=client,
-                                    user_id=strategy.user_id,
-                                    strategy=strategy.name,
-                                    symbol=exec_symbol,
-                                    exchange=exec_exchange,
-                                    action=exit_action,
-                                    quantity=exec_quantity,
-                                    price_type='MARKET',
-                                    product=exit_product
-                                )
-                                if response and isinstance(response, dict):
-                                    if response.get('status') == 'success':
-                                        break  # Success, exit retry loop
-                                    else:
-                                        # API returned error, retry
-                                        logger.warning(f"[SUPERTREND EXIT] Attempt {attempt + 1}/{max_retries} returned error for {exec_symbol}: {response.get('message', 'Unknown')}")
-                            except Exception as api_error:
-                                logger.warning(f"[SUPERTREND EXIT] Attempt {attempt + 1}/{max_retries} failed for {exec_symbol} on {account.account_name}: {api_error}")
-
-                            if attempt < max_retries - 1:
-                                time_module.sleep(retry_delay)
-                                retry_delay *= 2  # Exponential backoff
-                            else:
-                                if not response:
-                                    response = {'status': 'error', 'message': f'API error after {max_retries} retries'}
+                        try:
+                            response = place_order_with_freeze_check(
+                                client=client,
+                                user_id=strategy.user_id,
+                                strategy=strategy.name,
+                                symbol=exec_symbol,
+                                exchange=exec_exchange,
+                                action=exit_action,
+                                quantity=exec_quantity,
+                                price_type='MARKET',
+                                product=exit_product
+                            )
+                            logger.info(f"[SUPERTREND EXIT] Order response for {exec_symbol}: {response}")
+                        except Exception as api_error:
+                            logger.warning(f"[SUPERTREND EXIT] API error for {exec_symbol} on {account.account_name}: {api_error}")
+                            response = {'status': 'error', 'message': f'API error: {api_error}'}
 
                         # Re-fetch execution with lock to update order ID
                         execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)

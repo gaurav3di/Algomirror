@@ -52,6 +52,10 @@ tmp/
 temp/
 .temp/
 
+# Windows reserved names
+nul
+NUL
+
 # Security - Never commit these
 *.key
 *.pem
