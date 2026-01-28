@@ -598,20 +598,22 @@ class RiskManager:
                                     logger.warning(f"[P&L] Direct fetch failed for {exec.symbol}: {e}")
 
             for execution in executions:
-                # PRIORITY: WebSocket price (fresh) > API price (fallback) > entry price
+                # PRIORITY: Fresh API price (just fetched) > WebSocket price > entry price
+                # If we fetched API prices (because WebSocket was stale), use them!
                 current_price = None
                 price_source = None
 
                 if execution.status == 'entered':
-                    # Try WebSocket price first (from position_monitor)
-                    if execution.last_price and execution.last_price > 0:
+                    # PRIORITY 1: Fresh API price (if we just fetched it due to stale WebSocket)
+                    if api_prices.get(execution.symbol):
+                        current_price = api_prices.get(execution.symbol)
+                        price_source = 'api_fresh'
+                        logger.info(f"[P&L] {execution.symbol}: Using FRESH API price {current_price}")
+                    # PRIORITY 2: WebSocket price (only if no API price available)
+                    elif execution.last_price and execution.last_price > 0:
                         current_price = float(execution.last_price)
                         price_source = 'websocket'
                         logger.debug(f"[P&L] {execution.symbol}: Using WebSocket price {current_price}")
-                    # Fallback to API price if WebSocket stale
-                    elif api_prices.get(execution.symbol):
-                        current_price = api_prices.get(execution.symbol)
-                        price_source = 'api'
                         logger.debug(f"[P&L] {execution.symbol}: Using API price {current_price}")
                         # CRITICAL FIX: Store API price in execution so TSL has valid data
                         try:
@@ -642,7 +644,9 @@ class RiskManager:
                         pnl = (entry_price - current_price) * quantity
                         total_unrealized += pnl
 
-                    logger.debug(f"[P&L] {execution.symbol}: entry={entry_price}, current={current_price}, qty={quantity}, pnl={pnl:.2f}")
+                    # Debug: Log ALL values being used for P&L calculation
+                    logger.info(f"[P&L CALC] {execution.symbol}: entry={entry_price}, current={current_price}, "
+                               f"qty={quantity}, action={'BUY' if is_long else 'SELL'}, pnl={pnl:.2f}, source={price_source}")
                 elif execution.status == 'entered':
                     # OPEN position but no price - this shouldn't happen!
                     logger.error(f"[P&L] {execution.symbol}: OPEN position with NO price data! status={execution.status}, last_price={execution.last_price}, entry_price={execution.entry_price}")
@@ -695,13 +699,16 @@ class RiskManager:
         """
         # Check if max loss monitoring is enabled
         if not strategy.max_loss or strategy.max_loss <= 0:
+            logger.debug(f"[MaxLoss] Strategy {strategy.name}: max_loss not set or 0, skipping")
             return None
 
         if not strategy.auto_exit_on_max_loss:
+            logger.debug(f"[MaxLoss] Strategy {strategy.name}: auto_exit_on_max_loss=False, skipping")
             return None
 
         # Check if already triggered (prevent re-triggering)
         if strategy.max_loss_triggered_at:
+            logger.debug(f"[MaxLoss] Strategy {strategy.name}: already triggered at {strategy.max_loss_triggered_at}, skipping")
             return None
 
         # Calculate current P&L
@@ -718,8 +725,11 @@ class RiskManager:
             logger.warning(f"[MaxLoss] Strategy {strategy.name}: Prices unreliable, skipping check")
             return None
 
-        # Check if loss exceeds threshold (loss is negative)
+        # Log current P&L vs threshold
         max_loss_threshold = -abs(float(strategy.max_loss))
+        logger.info(f"[MaxLoss] Strategy {strategy.name}: P&L={current_pnl:.2f}, Threshold={max_loss_threshold:.2f}")
+
+        # Check if loss exceeds threshold (loss is negative)
 
         if current_pnl <= max_loss_threshold:
             logger.warning(
@@ -1186,10 +1196,11 @@ class RiskManager:
                     account = execution.account
                     if not account or not account.is_active:
                         logger.error(f"[RISK EXIT] Account not found or inactive for execution {execution.id}")
-                        # Revert status since we can't process
-                        execution.status = 'entered'
-                        execution.exit_reason = None
-                        execution.exit_time = None
+                        # DUPLICATE PREVENTION: Do NOT revert to 'entered' - keep as 'exit_pending'
+                        # This prevents the position from being picked up again for exit processing
+                        execution.error_message = f"Account {'inactive' if account else 'not found'} - manual intervention required"
+                        from datetime import timedelta
+                        execution.exit_retry_after = datetime.utcnow() + timedelta(minutes=5)  # Longer retry for account issues
                         db.session.commit()
                         fail_count += 1
                         continue
@@ -1373,7 +1384,13 @@ class RiskManager:
         try:
             # Check if risk monitoring is enabled
             if not strategy.risk_monitoring_enabled:
+                logger.debug(f"[RISK CHECK] Strategy {strategy.name}: risk_monitoring_enabled=False, skipping")
                 return
+
+            # Log what risk settings are configured
+            logger.debug(f"[RISK CHECK] Strategy {strategy.name}: max_loss={strategy.max_loss}, "
+                        f"max_profit={strategy.max_profit}, trailing_sl={strategy.trailing_sl}, "
+                        f"auto_exit_loss={strategy.auto_exit_on_max_loss}, auto_exit_profit={strategy.auto_exit_on_max_profit}")
 
             # Check max loss
             risk_event = self.check_max_loss(strategy)
@@ -1467,6 +1484,7 @@ class RiskManager:
         Note: Strategy.executions uses lazy='dynamic' which doesn't support joinedload.
         """
         if not self.is_running:
+            logger.warning("[RISK CHECK] Skipping - risk manager not running (is_running=False)")
             return
 
         try:
@@ -1489,6 +1507,9 @@ class RiskManager:
                 Strategy.risk_monitoring_enabled == True,
                 has_open_or_pending_positions
             ).all()
+
+            if strategies_with_positions:
+                logger.info(f"[RISK CHECK] Found {len(strategies_with_positions)} strategies with open positions")
 
             for strategy in strategies_with_positions:
                 self.check_strategy(strategy)

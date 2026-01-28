@@ -2311,8 +2311,35 @@ class StrategyExecutor:
 
     def _exit_position(self, execution: StrategyExecution, client: ExtendedOpenAlgoAPI,
                       reason: str = 'exit_condition'):
-        """Exit a position"""
+        """Exit a position with duplicate prevention"""
         try:
+            exec_id = execution.id
+            exec_symbol = execution.symbol
+
+            # DUPLICATE PREVENTION: Re-fetch with row-level locking
+            execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+            if not execution:
+                logger.warning(f"[EXIT] Execution {exec_id} no longer exists")
+                return
+
+            # DUPLICATE PREVENTION: Check if exit order already placed
+            if execution.exit_order_id:
+                logger.warning(f"[EXIT] SKIPPING {exec_symbol}: exit_order_id={execution.exit_order_id} already exists")
+                db.session.rollback()
+                return
+
+            # DUPLICATE PREVENTION: Check if status is not 'entered'
+            if execution.status != 'entered':
+                logger.warning(f"[EXIT] SKIPPING {exec_symbol}: status={execution.status} (not entered)")
+                db.session.rollback()
+                return
+
+            # DUPLICATE PREVENTION: Mark as exit_pending BEFORE placing order
+            execution.status = 'exit_pending'
+            execution.exit_reason = reason
+            execution.exit_time = datetime.utcnow()
+            db.session.commit()
+
             # Reverse the action
             exit_action = 'SELL' if execution.leg.action == 'BUY' else 'BUY'
 
@@ -2327,7 +2354,7 @@ class StrategyExecutor:
                 action=exit_action,
                 exchange=execution.exchange,
                 price_type='MARKET',
-                product=self.strategy.product_order_type or 'MIS',
+                product=execution.product or self.strategy.product_order_type or 'MIS',
                 quantity=execution.quantity
             )
 
@@ -2335,7 +2362,11 @@ class StrategyExecutor:
                 # Get the exit order ID
                 exit_order_id = response.get('orderid')
 
-                # Update original execution status
+                # Re-fetch with lock to update
+                execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+
+                # CRITICAL: Store the exit_order_id to prevent duplicates
+                execution.exit_order_id = exit_order_id
                 execution.status = 'exited'
                 execution.exit_time = datetime.utcnow()
                 execution.exit_reason = reason
@@ -2384,10 +2415,34 @@ class StrategyExecutor:
 
                 db.session.commit()
 
-                logger.debug(f"Exited position for {execution.symbol}: {reason}, Exit Order ID: {exit_order_id}, Exit Price: {execution.exit_price}")
+                logger.info(f"[EXIT SUCCESS] {execution.symbol}: {reason}, Order ID: {exit_order_id}, Exit Price: {execution.exit_price}")
+            else:
+                # Order failed - keep status as 'exit_pending' for retry mechanism
+                error_msg = response.get('message', 'Unknown error') if response else 'No response'
+                logger.warning(f"[EXIT FAILED] {exec_symbol}: {error_msg}")
+
+                # Re-fetch and update for retry
+                execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                if execution and execution.status == 'exit_pending' and not execution.exit_order_id:
+                    from datetime import timedelta
+                    execution.exit_retry_after = datetime.utcnow() + timedelta(seconds=10)
+                    execution.exit_attempt_count = (execution.exit_attempt_count or 0) + 1
+                    execution.error_message = f"Exit failed: {error_msg}"
+                    db.session.commit()
 
         except Exception as e:
-            logger.error(f"Error exiting position: {e}")
+            logger.error(f"[EXIT EXCEPTION] {exec_symbol}: {e}")
+            # Keep status as 'exit_pending' - don't revert to 'entered'
+            try:
+                execution = StrategyExecution.query.get(exec_id)
+                if execution and execution.status == 'exit_pending' and not execution.exit_order_id:
+                    from datetime import timedelta
+                    execution.exit_retry_after = datetime.utcnow() + timedelta(seconds=10)
+                    execution.exit_attempt_count = (execution.exit_attempt_count or 0) + 1
+                    execution.error_message = str(e)[:500]
+                    db.session.commit()
+            except Exception:
+                db.session.rollback()
 
     def _get_strategy_pnl(self) -> float:
         """Get total P&L for the strategy"""
@@ -2617,15 +2672,14 @@ class StrategyExecutor:
 
     def _exit_position_with_retry(self, execution: StrategyExecution, client: ExtendedOpenAlgoAPI,
                                    reason: str = 'exit_condition') -> bool:
-        """Exit a position with retry mechanism. Returns True on success.
+        """Exit a position with duplicate prevention. Returns True on success.
 
         RELIABILITY FIXES (v2.0):
         - Uses row-level locking to prevent concurrent exit orders
         - Marks status as exit_pending BEFORE placing order
         - Validates position state before processing
+        - No internal retry - relies on external retry mechanism with broker verification
         """
-        max_retries = 3
-        retry_delay = 1
         exec_id = execution.id
 
         # RELIABILITY FIX: Use row-level locking
