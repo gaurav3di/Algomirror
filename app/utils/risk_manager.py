@@ -33,6 +33,7 @@ from app.utils.openalgo_client import ExtendedOpenAlgoAPI
 from app.utils.exit_order_manager import (
     can_attempt_exit, mark_exit_pending, mark_exit_success, mark_exit_failed,
     mark_exit_confirmed, verify_exit_order_at_broker, get_pending_exit_retries,
+    atomic_claim_exit, atomic_claim_exit_retry,
     EXIT_RETRY_DELAY_SECONDS, MAX_EXIT_ATTEMPTS
 )
 
@@ -1149,40 +1150,39 @@ class RiskManager:
                     print(f"[RISK EXIT PHASE 2] All SELL positions closed. Starting BUY position exits...")
 
                 try:
-                    # RELIABILITY FIX: Use row-level locking to prevent concurrent modifications
-                    # with_for_update() ensures only one process can modify this execution at a time
-                    execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                    logger.debug(f"[RISK EXIT] Processing execution {idx + 1}/{len(execution_ids)}: ID={exec_id}")
 
+                    # ATOMIC DUPLICATE PREVENTION: Single SQL UPDATE claims this execution.
+                    # Only ONE thread/service can succeed - all others get rowcount=0 and skip.
+                    # This replaces the old can_attempt_exit() + mark_exit_pending() two-step
+                    # which had a TOCTOU race condition (especially on SQLite where
+                    # with_for_update() is a no-op).
+                    if is_retry_event:
+                        claimed = atomic_claim_exit_retry(exec_id, risk_event.event_type)
+                    else:
+                        claimed = atomic_claim_exit(exec_id, risk_event.event_type)
+
+                    if not claimed:
+                        logger.info(f"[RISK EXIT] SKIPPING execution {exec_id}: atomic claim failed "
+                                   f"(already claimed by another thread/service or not eligible)")
+                        print(f"[RISK EXIT] SKIPPING execution {exec_id}: already claimed or not eligible")
+                        continue
+
+                    # Successfully claimed - re-fetch execution to get field values
+                    execution = StrategyExecution.query.get(exec_id)
                     if not execution:
-                        logger.warning(f"[RISK EXIT] Execution {exec_id} no longer exists, skipping")
+                        logger.warning(f"[RISK EXIT] Execution {exec_id} no longer exists after claim")
                         continue
 
-                    logger.debug(f"[RISK EXIT] Processing execution {idx + 1}/{len(execution_ids)}: ID={execution.id}, symbol={execution.symbol}")
-
-                    # DUPLICATE PREVENTION: Check if we can attempt exit using new exit order manager
-                    can_exit, exit_reason = can_attempt_exit(execution)
-                    if not can_exit:
-                        logger.warning(f"[RISK EXIT] SKIPPING execution {execution.id} for {execution.symbol}: {exit_reason}")
-                        print(f"[RISK EXIT] SKIPPING {execution.symbol}: {exit_reason}")
-                        db.session.rollback()  # Release the row lock
-                        continue
-
-                    # CRITICAL: Skip if quantity is 0 or None (position already closed at broker level)
+                    # Handle zero-quantity positions (already closed at broker level)
                     if not execution.quantity or execution.quantity <= 0:
-                        logger.warning(f"[RISK EXIT] SKIPPING execution {execution.id} for {execution.symbol}: quantity is {execution.quantity} (position may already be closed)")
+                        logger.warning(f"[RISK EXIT] Execution {exec_id} ({execution.symbol}): quantity={execution.quantity}, marking as exited")
                         print(f"[RISK EXIT] SKIPPING {execution.symbol}: quantity={execution.quantity}")
-                        # Mark as exited since there's nothing to close
                         execution.status = 'exited'
                         execution.exit_reason = f"{risk_event.event_type}_no_quantity"
                         execution.exit_time = datetime.utcnow()
                         db.session.commit()
                         continue
-
-                    # DUPLICATE PREVENTION: Mark as exit_pending with retry tracking
-                    # This prevents duplicate exit orders by:
-                    # 1. Setting status to 'exit_pending' (not 'entered')
-                    # 2. Recording attempt count and retry timer
-                    mark_exit_pending(execution, risk_event.event_type)
 
                     # Store values we need before releasing the lock
                     exec_id = execution.id
@@ -1289,8 +1289,8 @@ class RiskManager:
                         print(f"[RISK EXIT] API ERROR: {exec_symbol} - {api_error}")
                         response = {'status': 'error', 'message': f'API error: {api_error}'}
 
-                    # Re-fetch execution with lock to update order ID
-                    execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                    # Re-fetch execution to update order ID
+                    execution = StrategyExecution.query.get(exec_id)
 
                     if response and response.get('status') == 'success':
                         order_id = response.get('orderid')

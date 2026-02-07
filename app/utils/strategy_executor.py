@@ -2317,7 +2317,7 @@ class StrategyExecutor:
             exec_symbol = execution.symbol
 
             # DUPLICATE PREVENTION: Re-fetch with row-level locking
-            execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+            execution = StrategyExecution.query.get(exec_id)
             if not execution:
                 logger.warning(f"[EXIT] Execution {exec_id} no longer exists")
                 return
@@ -2363,7 +2363,7 @@ class StrategyExecutor:
                 exit_order_id = response.get('orderid')
 
                 # Re-fetch with lock to update
-                execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                execution = StrategyExecution.query.get(exec_id)
 
                 # CRITICAL: Store the exit_order_id to prevent duplicates
                 execution.exit_order_id = exit_order_id
@@ -2422,7 +2422,7 @@ class StrategyExecutor:
                 logger.warning(f"[EXIT FAILED] {exec_symbol}: {error_msg}")
 
                 # Re-fetch and update for retry
-                execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                execution = StrategyExecution.query.get(exec_id)
                 if execution and execution.status == 'exit_pending' and not execution.exit_order_id:
                     from datetime import timedelta
                     execution.exit_retry_after = datetime.utcnow() + timedelta(seconds=10)
@@ -2674,46 +2674,42 @@ class StrategyExecutor:
                                    reason: str = 'exit_condition') -> bool:
         """Exit a position with duplicate prevention. Returns True on success.
 
-        RELIABILITY FIXES (v2.0):
-        - Uses row-level locking to prevent concurrent exit orders
-        - Marks status as exit_pending BEFORE placing order
-        - Validates position state before processing
+        RELIABILITY FIXES (v3.0):
+        - Uses atomic SQL UPDATE to prevent concurrent exit orders
+        - Single UPDATE with WHERE clause replaces two-step check+mark
+        - Works on SQLite (database-level lock) and PostgreSQL (row-level lock)
         - No internal retry - relies on external retry mechanism with broker verification
         """
         exec_id = execution.id
 
-        # RELIABILITY FIX: Use row-level locking
-        execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
-        if not execution:
-            logger.warning(f"[EXIT] Execution {exec_id} no longer exists")
+        # ATOMIC DUPLICATE PREVENTION: Single SQL UPDATE claims this execution.
+        # Only ONE thread/service can succeed - all others get False and skip.
+        from app.utils.exit_order_manager import atomic_claim_exit
+        claimed = atomic_claim_exit(exec_id, reason)
+
+        if not claimed:
+            # Check if it's already exited (consider as success)
+            execution = StrategyExecution.query.get(exec_id)
+            if execution and execution.status in ['exit_pending', 'exited']:
+                logger.info(f"[EXIT] Execution {exec_id}: already in {execution.status} state")
+                return True
+            logger.info(f"[EXIT] Execution {exec_id}: atomic claim failed, skipping")
             return False
 
-        # CRITICAL: Skip if exit order already placed
-        if execution.exit_order_id:
-            logger.warning(f"[EXIT] SKIPPING execution {exec_id}: exit_order_id={execution.exit_order_id} already exists")
-            db.session.rollback()
-            return True  # Consider already exited as success
+        # Successfully claimed - re-fetch to get field values
+        execution = StrategyExecution.query.get(exec_id)
+        if not execution:
+            logger.warning(f"[EXIT] Execution {exec_id} no longer exists after claim")
+            return False
 
-        # CRITICAL: Skip if status is not 'entered'
-        if execution.status != 'entered':
-            logger.warning(f"[EXIT] SKIPPING execution {exec_id}: status={execution.status} (not entered)")
-            db.session.rollback()
-            return execution.status in ['exit_pending', 'exited']
-
-        # CRITICAL: Skip if quantity is 0 or None
+        # Handle zero-quantity positions
         if not execution.quantity or execution.quantity <= 0:
-            logger.warning(f"[EXIT] SKIPPING execution {exec_id}: quantity={execution.quantity}")
+            logger.warning(f"[EXIT] Execution {exec_id}: quantity={execution.quantity}, marking as exited")
             execution.status = 'exited'
             execution.exit_reason = f"{reason}_no_quantity"
             execution.exit_time = datetime.utcnow()
             db.session.commit()
             return True
-
-        # RELIABILITY FIX: Mark as exit_pending BEFORE placing order
-        execution.status = 'exit_pending'
-        execution.exit_reason = reason
-        execution.exit_time = datetime.utcnow()
-        db.session.commit()  # Commit immediately to claim this execution
 
         # Store values we need for order placement
         exec_symbol = execution.symbol
@@ -2749,8 +2745,8 @@ class StrategyExecutor:
                 # Get the exit order ID
                 exit_order_id = response.get('orderid')
 
-                # Re-fetch execution with lock to update
-                execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                # Re-fetch execution to update
+                execution = StrategyExecution.query.get(exec_id)
 
                 # Update with actual exit order ID
                 execution.exit_order_id = exit_order_id
@@ -2807,7 +2803,7 @@ class StrategyExecutor:
         # Do NOT revert to 'entered' - this prevents duplicate exit orders
         # The external retry mechanism will verify with broker before placing another order
         try:
-            execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+            execution = StrategyExecution.query.get(exec_id)
             if execution and execution.status == 'exit_pending' and not execution.exit_order_id:
                 # Keep status as exit_pending, set retry timer
                 from datetime import timedelta

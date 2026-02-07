@@ -17,6 +17,7 @@ This module solves the duplicate exit order problem by:
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
+from sqlalchemy import update as sa_update, func
 from app import db
 from app.models import StrategyExecution, TradingAccount
 from app.utils.openalgo_client import ExtendedOpenAlgoAPI
@@ -26,6 +27,119 @@ logger = logging.getLogger(__name__)
 # Configuration
 EXIT_RETRY_DELAY_SECONDS = 10  # Wait 10 seconds before allowing retry
 MAX_EXIT_ATTEMPTS = 5  # Maximum number of exit attempts before marking as failed
+
+
+def atomic_claim_exit(execution_id: int, exit_reason: str) -> bool:
+    """
+    Atomically claim an execution for exit processing.
+
+    Uses a single SQL UPDATE with WHERE clause to ensure only ONE thread/service
+    can transition an execution from 'entered' to 'exit_pending'.
+
+    WHY THIS EXISTS:
+    The previous approach used two separate operations:
+      1. can_attempt_exit() - READ status
+      2. mark_exit_pending() - WRITE status
+    This created a TOCTOU (Time-of-Check to Time-of-Use) race condition where
+    multiple threads could read status='entered' simultaneously and all proceed
+    to place exit orders, causing DUPLICATE ORDERS.
+
+    HOW IT WORKS:
+    - SQLite serializes ALL writes at the database level (one writer at a time)
+    - PostgreSQL uses row-level locking in UPDATE
+    - The WHERE clause ensures only rows matching ALL conditions are updated
+    - If Thread A updates first, Thread B's WHERE won't match (status changed)
+    - Thread B gets rowcount=0 and skips - NO DUPLICATE
+
+    Args:
+        execution_id: ID of the StrategyExecution to claim
+        exit_reason: Reason for the exit (e.g., 'max_loss', 'supertrend_breakout')
+
+    Returns:
+        True if this caller successfully claimed the execution for exit.
+        False if another thread already claimed it or conditions not met.
+    """
+    now = datetime.utcnow()
+
+    try:
+        result = db.session.execute(
+            sa_update(StrategyExecution)
+            .where(StrategyExecution.id == execution_id)
+            .where(StrategyExecution.status == 'entered')
+            .where(StrategyExecution.exit_order_id.is_(None))
+            .values(
+                status='exit_pending',
+                exit_reason=exit_reason,
+                exit_pending_since=now,
+                exit_attempt_count=func.coalesce(StrategyExecution.exit_attempt_count, 0) + 1,
+                exit_retry_after=now + timedelta(seconds=EXIT_RETRY_DELAY_SECONDS)
+            )
+        )
+        db.session.commit()
+
+        claimed = result.rowcount > 0
+        if claimed:
+            logger.info(f"[ATOMIC_CLAIM] Execution {execution_id} claimed for exit: {exit_reason}")
+        else:
+            logger.info(f"[ATOMIC_CLAIM] Execution {execution_id} NOT claimed "
+                       f"(already claimed or not in 'entered' state)")
+
+        return claimed
+
+    except Exception as e:
+        logger.error(f"[ATOMIC_CLAIM] Error claiming execution {execution_id}: {e}")
+        db.session.rollback()
+        return False
+
+
+def atomic_claim_exit_retry(execution_id: int, exit_reason: str) -> bool:
+    """
+    Atomically claim an exit_pending execution for retry.
+
+    Only succeeds if:
+    - Status is 'exit_pending' (previous attempt failed)
+    - No exit_order_id (no successful order placed)
+    - Retry timer has expired (cooldown passed)
+    - Max attempts not exceeded
+
+    Args:
+        execution_id: ID of the StrategyExecution to retry
+        exit_reason: Reason for the retry
+
+    Returns:
+        True if this caller successfully claimed the retry.
+    """
+    now = datetime.utcnow()
+
+    try:
+        result = db.session.execute(
+            sa_update(StrategyExecution)
+            .where(StrategyExecution.id == execution_id)
+            .where(StrategyExecution.status == 'exit_pending')
+            .where(StrategyExecution.exit_order_id.is_(None))
+            .where(StrategyExecution.exit_retry_after <= now)
+            .where(StrategyExecution.exit_attempt_count < MAX_EXIT_ATTEMPTS)
+            .values(
+                exit_attempt_count=func.coalesce(StrategyExecution.exit_attempt_count, 0) + 1,
+                exit_retry_after=now + timedelta(seconds=EXIT_RETRY_DELAY_SECONDS),
+                exit_reason=exit_reason
+            )
+        )
+        db.session.commit()
+
+        claimed = result.rowcount > 0
+        if claimed:
+            logger.info(f"[ATOMIC_RETRY] Execution {execution_id} claimed for retry: {exit_reason}")
+        else:
+            logger.info(f"[ATOMIC_RETRY] Execution {execution_id} NOT claimed for retry "
+                       f"(timer not expired, max attempts, or already has exit_order_id)")
+
+        return claimed
+
+    except Exception as e:
+        logger.error(f"[ATOMIC_RETRY] Error claiming retry for execution {execution_id}: {e}")
+        db.session.rollback()
+        return False
 
 
 def verify_exit_order_at_broker(

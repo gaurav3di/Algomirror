@@ -24,6 +24,7 @@ from app.utils.openalgo_client import ExtendedOpenAlgoAPI
 from app.utils.exit_order_manager import (
     can_attempt_exit, mark_exit_pending, mark_exit_success, mark_exit_failed,
     mark_exit_confirmed, verify_exit_order_at_broker, get_pending_exit_retries,
+    atomic_claim_exit, atomic_claim_exit_retry,
     EXIT_RETRY_DELAY_SECONDS, MAX_EXIT_ATTEMPTS
 )
 import pandas as pd
@@ -674,21 +675,26 @@ class SupertrendExitService:
                         logger.info(f"[SUPERTREND EXIT PHASE 2] All SELL positions closed. Starting BUY position exits...")
                         print(f"[SUPERTREND EXIT PHASE 2] All SELL positions closed. Starting BUY position exits...")
                     try:
-                        # ATOMIC: Re-query execution with row lock to prevent race conditions
-                        # This ensures only ONE thread can process this execution
-                        execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                        # ATOMIC DUPLICATE PREVENTION: Single SQL UPDATE claims this execution.
+                        # Only ONE thread/service can succeed - all others get rowcount=0 and skip.
+                        # This replaces the old can_attempt_exit() + mark_exit_pending() two-step
+                        # which had a TOCTOU race on SQLite (with_for_update is a no-op on SQLite).
+                        if is_retry_event:
+                            claimed = atomic_claim_exit_retry(exec_id, exit_reason)
+                        else:
+                            claimed = atomic_claim_exit(exec_id, exit_reason)
+
+                        if not claimed:
+                            logger.info(f"[SUPERTREND EXIT] Execution {exec_id}: SKIPPING - atomic claim failed")
+                            continue
+
+                        # Successfully claimed - re-fetch to get field values
+                        execution = StrategyExecution.query.get(exec_id)
                         if not execution:
-                            logger.warning(f"[SUPERTREND EXIT] Execution {exec_id} not found")
+                            logger.warning(f"[SUPERTREND EXIT] Execution {exec_id} not found after claim")
                             continue
 
-                        # DUPLICATE PREVENTION: Check if we can attempt exit using new exit order manager
-                        can_exit, exit_check_reason = can_attempt_exit(execution)
-                        if not can_exit:
-                            logger.info(f"[SUPERTREND EXIT] Execution {exec_id}: SKIPPING - {exit_check_reason}")
-                            db.session.rollback()  # Release the row lock
-                            continue
-
-                        logger.info(f"[SUPERTREND EXIT] Execution {exec_id}: PROCEEDING - can_attempt_exit=True")
+                        logger.info(f"[SUPERTREND EXIT] Execution {exec_id}: CLAIMED - proceeding with exit")
 
                         # Use the execution's account (NOT primary account)
                         account = execution.account
@@ -711,12 +717,6 @@ class SupertrendExitService:
 
                         # Get product type - prefer execution's product, fallback to strategy's product_order_type
                         exit_product = execution.product or strategy.product_order_type or 'MIS'
-
-                        # DUPLICATE PREVENTION: Mark as exit_pending with retry tracking
-                        # This prevents duplicate exit orders by:
-                        # 1. Setting status to 'exit_pending' (not 'entered')
-                        # 2. Recording attempt count and retry timer
-                        mark_exit_pending(execution, exit_reason)
 
                         # Store values we need for order placement
                         exec_id = execution.id
@@ -782,8 +782,8 @@ class SupertrendExitService:
                             logger.warning(f"[SUPERTREND EXIT] API error for {exec_symbol} on {account.account_name}: {api_error}")
                             response = {'status': 'error', 'message': f'API error: {api_error}'}
 
-                        # Re-fetch execution with lock to update order ID
-                        execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                        # Re-fetch execution to update order ID
+                        execution = StrategyExecution.query.get(exec_id)
 
                         if response and response.get('status') == 'success':
                             order_id = response.get('orderid')

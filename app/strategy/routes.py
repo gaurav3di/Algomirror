@@ -1679,22 +1679,21 @@ def close_all_positions(strategy_id):
         def close_position_worker(position, strategy_name, product_type, thread_index, user_id):
             """Worker function to close a single position in parallel
 
-            RELIABILITY FIXES (v2.0):
-            - Uses row-level locking to prevent concurrent exit orders
-            - Marks status as exit_pending BEFORE placing order
-            - Validates position state before processing
+            RELIABILITY FIXES (v3.0):
+            - Uses atomic SQL UPDATE to prevent concurrent exit orders
+            - Single UPDATE with WHERE clause replaces two-step check+mark
+            - Works on SQLite (database-level lock) and PostgreSQL (row-level lock)
             """
             import time
 
             # Add staggered delay based on thread index to prevent OpenAlgo race condition
             # Each thread waits: index * 300ms (0ms, 300ms, 600ms, 900ms, ...)
-            # This GUARANTEES threads never hit OpenAlgo at the same time
             delay = thread_index * 0.3
             if delay > 0:
                 time.sleep(delay)
-                logger.debug(f"[THREAD {thread_index}] Waited {delay:.2f}s to prevent race condition")
+                logger.debug(f"[THREAD {thread_index}] Waited {delay:.2f}s to stagger API calls")
 
-            # Store position ID - we'll re-fetch with lock inside app context
+            # Store position ID for atomic claim
             position_id = position.id
 
             # Create Flask app context for this thread
@@ -1702,39 +1701,30 @@ def close_all_positions(strategy_id):
 
             with app.app_context():
                 try:
-                    # RELIABILITY FIX: Use row-level locking to prevent concurrent modifications
-                    position = StrategyExecution.query.with_for_update(nowait=False).get(position_id)
+                    # ATOMIC DUPLICATE PREVENTION: Single SQL UPDATE claims this position.
+                    # Only ONE thread can succeed per position - all others get False and skip.
+                    from app.utils.exit_order_manager import atomic_claim_exit
+                    claimed = atomic_claim_exit(position_id, 'manual_close')
 
+                    if not claimed:
+                        logger.info(f"[THREAD] SKIPPING position {position_id}: atomic claim failed "
+                                   f"(already claimed by another thread or not in 'entered' state)")
+                        return
+
+                    # Successfully claimed - re-fetch to get field values
+                    position = StrategyExecution.query.get(position_id)
                     if not position:
-                        logger.warning(f"[THREAD] Position {position_id} no longer exists, skipping")
+                        logger.warning(f"[THREAD] Position {position_id} no longer exists after claim")
                         return
 
-                    # CRITICAL: Skip if exit order already placed (prevent double orders)
-                    if position.exit_order_id:
-                        logger.warning(f"[THREAD] SKIPPING position {position_id}: exit_order_id={position.exit_order_id} already exists")
-                        db.session.rollback()  # Release row lock
-                        return
-
-                    # CRITICAL: Skip if status is not 'entered'
-                    if position.status != 'entered':
-                        logger.warning(f"[THREAD] SKIPPING position {position_id}: status={position.status} (not entered)")
-                        db.session.rollback()  # Release row lock
-                        return
-
-                    # CRITICAL: Skip if quantity is 0 or None
+                    # Handle zero-quantity positions
                     if not position.quantity or position.quantity <= 0:
-                        logger.warning(f"[THREAD] SKIPPING position {position_id}: quantity={position.quantity}")
+                        logger.warning(f"[THREAD] Position {position_id}: quantity={position.quantity}, marking as exited")
                         position.status = 'exited'
                         position.exit_reason = 'manual_close_no_quantity'
                         position.exit_time = datetime.utcnow()
                         db.session.commit()
                         return
-
-                    # RELIABILITY FIX: Mark as exit_pending BEFORE placing order
-                    position.status = 'exit_pending'
-                    position.exit_reason = 'manual_close'
-                    position.exit_time = datetime.utcnow()
-                    db.session.commit()  # Commit immediately to claim this position
 
                     logger.debug(f"[THREAD] Closing position: {position.symbol} on account {position.account.account_name}, leg {position.leg.leg_number}")
 
@@ -1808,7 +1798,7 @@ def close_all_positions(strategy_id):
                     logger.debug(f"[THREAD] Close order response for {pos_symbol}: {response}")
 
                     # Re-fetch position with lock to update order ID
-                    position_to_update = StrategyExecution.query.with_for_update(nowait=False).get(position_id)
+                    position_to_update = StrategyExecution.query.get(position_id)
 
                     if response and response.get('status') == 'success':
                         # Get exit order ID from response
@@ -2002,9 +1992,8 @@ def close_individual_position(strategy_id):
         # RELIABILITY FIX: Clear SQLAlchemy cache to ensure fresh data
         db.session.expire_all()
 
-        # Find the open position in database with row lock
-        # RELIABILITY FIX: Added filters for exit_order_id and quantity validation
-        position = StrategyExecution.query.with_for_update(nowait=False).filter(
+        # Find the open position in database
+        position = StrategyExecution.query.filter(
             StrategyExecution.strategy_id == strategy_id,
             StrategyExecution.symbol == symbol,
             StrategyExecution.exchange == exchange,
@@ -2097,11 +2086,14 @@ def close_individual_position(strategy_id):
         # Reverse action for closing
         close_action = 'SELL' if leg_action == 'BUY' else 'BUY'
 
-        # RELIABILITY FIX: Mark as exit_pending BEFORE placing order
-        position.status = 'exit_pending'
-        position.exit_reason = 'manual_close'
-        position.exit_time = datetime.utcnow()
-        db.session.commit()  # Commit immediately to claim this position
+        # ATOMIC DUPLICATE PREVENTION: Claim this position with a single SQL UPDATE
+        from app.utils.exit_order_manager import atomic_claim_exit
+        claimed = atomic_claim_exit(position.id, 'manual_close')
+        if not claimed:
+            return jsonify({
+                'status': 'error',
+                'message': 'Position exit already in progress'
+            }), 409
 
         logger.debug(f"Closing individual position: {close_action} {pos_quantity} {symbol} on {exchange}")
 
@@ -2145,7 +2137,7 @@ def close_individual_position(strategy_id):
         logger.debug(f"Close position response for {symbol}: {response}")
 
         # Re-fetch position with lock to update order ID
-        position = StrategyExecution.query.with_for_update(nowait=False).get(position_id)
+        position = StrategyExecution.query.get(position_id)
 
         if response and response.get('status') == 'success':
             # Get exit order ID from response
@@ -2298,38 +2290,28 @@ def close_leg_all_accounts(strategy_id):
 
             with app.app_context():
                 try:
-                    # RELIABILITY FIX: Use row-level locking to prevent concurrent modifications
-                    position = StrategyExecution.query.with_for_update(nowait=False).get(position_id)
+                    # ATOMIC DUPLICATE PREVENTION: Single SQL UPDATE claims this position.
+                    from app.utils.exit_order_manager import atomic_claim_exit
+                    claimed = atomic_claim_exit(position_id, 'leg_close')
+
+                    if not claimed:
+                        logger.info(f"[THREAD] SKIPPING position {position_id}: atomic claim failed")
+                        return
+
+                    # Successfully claimed - re-fetch to get field values
+                    position = StrategyExecution.query.get(position_id)
                     if not position:
-                        logger.error(f"[THREAD] Position {position_id} not found in database")
+                        logger.error(f"[THREAD] Position {position_id} not found after claim")
                         return
 
-                    # CRITICAL: Skip if exit order already placed (prevent double orders)
-                    if position.exit_order_id:
-                        logger.warning(f"[THREAD] SKIPPING position {position_id}: exit_order_id={position.exit_order_id} already exists")
-                        db.session.rollback()  # Release row lock
-                        return
-
-                    # CRITICAL: Skip if status is not 'entered'
-                    if position.status != 'entered':
-                        logger.warning(f"[THREAD] SKIPPING position {position_id}: status={position.status} (not entered)")
-                        db.session.rollback()  # Release row lock
-                        return
-
-                    # CRITICAL: Skip if quantity is 0 or None
+                    # Handle zero-quantity positions
                     if not position.quantity or position.quantity <= 0:
-                        logger.warning(f"[THREAD] SKIPPING position {position_id}: quantity={position.quantity}")
+                        logger.warning(f"[THREAD] Position {position_id}: quantity={position.quantity}, marking as exited")
                         position.status = 'exited'
                         position.exit_reason = 'leg_close_no_quantity'
                         position.exit_time = datetime.utcnow()
                         db.session.commit()
                         return
-
-                    # RELIABILITY FIX: Mark as exit_pending BEFORE placing order
-                    position.status = 'exit_pending'
-                    position.exit_reason = 'leg_close'
-                    position.exit_time = datetime.utcnow()
-                    db.session.commit()  # Commit immediately to claim this position
 
                     # Store values we need for order placement
                     pos_symbol = position.symbol
@@ -2437,7 +2419,7 @@ def close_leg_all_accounts(strategy_id):
                     logger.debug(f"[THREAD] Close leg order response for {pos_symbol}: {response}")
 
                     # Re-fetch position with lock to update order ID
-                    position_to_update = StrategyExecution.query.with_for_update(nowait=False).get(position_id)
+                    position_to_update = StrategyExecution.query.get(position_id)
 
                     if response and response.get('status') == 'success':
                         # Get exit order ID from response
