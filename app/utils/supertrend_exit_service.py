@@ -51,9 +51,15 @@ class SupertrendExitService:
         self.scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Kolkata'))
         self.is_running = False
         self.monitoring_strategies = {}  # strategy_id -> last_check_time
+        self.flask_app = None  # Store Flask app reference instead of creating new one
         self._initialized = True
 
         logger.debug("Supertrend Exit Service initialized")
+
+    def set_flask_app(self, app):
+        """Store Flask app instance for use in background thread"""
+        self.flask_app = app
+        logger.debug("Flask app instance registered with Supertrend Exit Service")
 
     def start_service(self):
         """Start the background service"""
@@ -99,10 +105,13 @@ class SupertrendExitService:
         cycle_id = str(uuid.uuid4())[:8]  # Unique ID for this execution cycle
 
         try:
-            from app import create_app
+            # Use stored Flask app, or create one if not set (fallback)
+            if self.flask_app:
+                app = self.flask_app
+            else:
+                from app import create_app
+                app = create_app()
 
-            # Create Flask app context
-            app = create_app()
             with app.app_context():
                 from app import db
 

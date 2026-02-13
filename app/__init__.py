@@ -246,6 +246,7 @@ def create_app(config_name=None):
 
     # Initialize Supertrend exit monitoring service
     from app.utils.supertrend_exit_service import supertrend_exit_service
+    supertrend_exit_service.set_flask_app(app)
     supertrend_exit_service.start_service()
     app.logger.debug('Supertrend exit monitoring service started', extra={'event': 'supertrend_exit_init'})
 

@@ -302,7 +302,9 @@ def close_account_positions(account_id):
     from app.models import Strategy, StrategyExecution, StrategyLeg
     from app.utils.openalgo_client import ExtendedOpenAlgoAPI
     from app.utils.freeze_quantity_handler import place_order_with_freeze_check
-    from app import create_app
+
+    # Capture app reference before spawning threads
+    app = current_app._get_current_object()
 
     # Verify account ownership
     account = TradingAccount.query.filter_by(
@@ -349,9 +351,6 @@ def close_account_positions(account_id):
         delay = thread_index * 0.3
         if delay > 0:
             time_module.sleep(delay)
-
-        # Create Flask app context for this thread
-        app = create_app()
 
         with app.app_context():
             try:

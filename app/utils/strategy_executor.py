@@ -397,9 +397,7 @@ class StrategyExecutor:
         print(f"[LEG {leg.leg_number} THREAD] STARTED: {leg.instrument} {leg.action} {leg.option_type if leg.product_type == 'options' else ''}", flush=True)
 
         try:
-            # Create fresh app context for this thread (similar to _monitor_exit_conditions)
-            from app import create_app
-            app = create_app()
+            app = self.app
 
             with app.app_context():
                 # Reuse existing _execute_leg logic
@@ -661,9 +659,7 @@ class StrategyExecutor:
         account_name = account.account_name
         print(f"[THREAD {thread_index}] Leg {leg.leg_number}, account={account_name}: STARTED - {symbol} {leg.action} qty={quantity}", flush=True)
 
-        # Create fresh app context for this thread to avoid session conflicts
-        from app import create_app
-        app = create_app()
+        app = self.app
 
         with app.app_context():
             try:
@@ -2082,10 +2078,8 @@ class StrategyExecutor:
     def _monitor_exit_conditions(self, execution_id: int):
         """Monitor position for exit conditions using real-time WebSocket data"""
         import time as time_module
-        from app import create_app
 
-        # Create new app context for this thread
-        app = create_app()
+        app = self.app
         with app.app_context():
             # Query execution fresh in this thread's context
             execution = StrategyExecution.query.get(execution_id)
