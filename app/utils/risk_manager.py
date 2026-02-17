@@ -924,10 +924,17 @@ class RiskManager:
             else:  # 'amount'
                 initial_stop_pnl = -trailing_value
 
-            # Set initial stop if not already set
-            if strategy.trailing_sl_initial_stop is None:
+            # Always recalculate initial stop based on current open positions
+            # This handles multi-leg strategies where legs fill at different times
+            # (BUY-FIRST execution means SELL legs fill after BUY legs)
+            if strategy.trailing_sl_initial_stop is None or abs(strategy.trailing_sl_initial_stop - initial_stop_pnl) > 0.01:
+                old_stop = strategy.trailing_sl_initial_stop
                 strategy.trailing_sl_initial_stop = initial_stop_pnl
-                logger.debug(f"[TSL STATE] Strategy {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (Net Premium: {net_premium:.2f}, Entry Value: {entry_value:.2f})")
+                if old_stop is None:
+                    logger.debug(f"[TSL STATE] Strategy {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (Net Premium: {net_premium:.2f}, Entry Value: {entry_value:.2f})")
+                else:
+                    logger.info(f"[TSL STATE] Strategy {strategy.name}: Initial stop RECALCULATED {old_stop:.2f} -> {initial_stop_pnl:.2f} (legs changed)")
+                    print(f"[TSL] {strategy.name}: Initial stop RECALCULATED {old_stop:.2f} -> {initial_stop_pnl:.2f} (net_premium={net_premium:.2f})", flush=True)
 
             # TSL is ALWAYS active from entry (no waiting state)
             strategy.trailing_sl_active = True

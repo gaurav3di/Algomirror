@@ -2292,10 +2292,16 @@ def risk_status_stream():
                                 else:
                                     initial_stop_pnl = -trailing_value
 
-                                # Set initial stop if not already set
-                                if strategy.trailing_sl_initial_stop is None:
+                                # Always recalculate initial stop based on current open positions
+                                # This handles multi-leg strategies where legs fill at different times
+                                # (BUY-FIRST execution means SELL legs fill after BUY legs)
+                                if strategy.trailing_sl_initial_stop is None or abs(strategy.trailing_sl_initial_stop - initial_stop_pnl) > 0.01:
+                                    old_stop = strategy.trailing_sl_initial_stop
                                     strategy.trailing_sl_initial_stop = initial_stop_pnl
-                                    print(f"[TSL SSE] {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (entry_value={entry_value:.2f})", flush=True)
+                                    if old_stop is None:
+                                        print(f"[TSL SSE] {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (net_premium={net_premium:.2f}, entry_value={entry_value:.2f})", flush=True)
+                                    else:
+                                        print(f"[TSL SSE] {strategy.name}: Initial stop RECALCULATED {old_stop:.2f} -> {initial_stop_pnl:.2f} (legs changed, net_premium={net_premium:.2f})", flush=True)
 
                                 strategy.trailing_sl_active = True
 
