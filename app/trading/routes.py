@@ -1532,8 +1532,13 @@ def risk_status_stream():
         """
         Execute exit order for a specific leg when SL/TP is hit.
 
-        IMPORTANT: This exits on the EXECUTION's account, not the primary account.
-        For multi-account strategies, each execution is tied to a specific account.
+        Uses atomic claim-before-order pattern:
+        1. Row-level lock on execution
+        2. Validate not already exiting
+        3. Set exit_pending + commit to CLAIM before API call
+        4. Place order
+        5. On success: set exit_order_id + commit
+        6. On failure: revert to entered + commit
 
         Args:
             execution_id: ID of the StrategyExecution to close
@@ -1542,7 +1547,7 @@ def risk_status_stream():
             exchange: Exchange name
             quantity: Quantity to exit
             action: Entry action (BUY/SELL) to determine exit direction
-            exit_reason: 'stop_loss' or 'take_profit'
+            exit_reason: 'stop_loss', 'take_profit', 'stop_loss_retry', or 'take_profit_retry'
             trigger_price: Price at which the exit was triggered
 
         Returns:
@@ -1555,26 +1560,61 @@ def risk_status_stream():
         try:
             # Use app context for database operations
             with app.app_context():
-                # Get the execution first - we need its account
-                execution = StrategyExecution.query.get(execution_id)
+                # ATOMIC: Row-level lock to prevent concurrent exit attempts
+                execution = StrategyExecution.query.with_for_update(nowait=False).get(execution_id)
                 if not execution:
-                    app.logger.error(f"[RISK MONITOR] Execution {execution_id} not found")
+                    print(f"[EXIT ORDER] SKIP: Execution {execution_id} not found", flush=True)
                     return False
+
+                # DUPLICATE GUARD: Check if exit order already placed
+                if execution.exit_order_id:
+                    print(f"[EXIT ORDER] SKIP DUPLICATE: exec_id={execution_id} ({symbol}) already has exit_order_id={execution.exit_order_id}, status={execution.status}, caller={exit_reason}", flush=True)
+                    db.session.rollback()  # Release row lock
+                    return False
+                if execution.status in ['exit_pending', 'exited']:
+                    print(f"[EXIT ORDER] SKIP DUPLICATE: exec_id={execution_id} ({symbol}) status={execution.status}, caller={exit_reason}", flush=True)
+                    db.session.rollback()  # Release row lock
+                    return False
+                if not execution.quantity or execution.quantity <= 0:
+                    print(f"[EXIT ORDER] SKIP: exec_id={execution_id} ({symbol}) quantity={execution.quantity}, marking as exited", flush=True)
+                    execution.status = 'exited'
+                    execution.exit_reason = f"{exit_reason}_no_quantity"
+                    execution.exit_time = datetime.utcnow()
+                    db.session.commit()
+                    return False
+
+                print(f"[EXIT ORDER] START: exec_id={execution_id}, symbol={symbol}, reason={exit_reason}, trigger_price={trigger_price}, entry_action={action}, qty={quantity}", flush=True)
 
                 # Get the strategy
                 strategy = Strategy.query.get(strategy_id)
                 if not strategy:
-                    app.logger.error(f"[RISK MONITOR] Strategy not found for execution {execution_id}")
+                    print(f"[EXIT ORDER] SKIP: Strategy not found for execution {execution_id}", flush=True)
+                    db.session.rollback()
                     return False
 
                 # Use the execution's account (NOT primary account)
-                # Each execution is tied to a specific account in multi-account setups
                 account = execution.account
                 if not account or not account.is_active:
-                    app.logger.error(f"[RISK MONITOR] Account not found or inactive for execution {execution_id}")
+                    print(f"[EXIT ORDER] SKIP: Account not found or inactive for exec_id={execution_id}", flush=True)
+                    db.session.rollback()
                     return False
 
-                app.logger.debug(f"[RISK MONITOR] Using account {account.account_name} for execution {execution_id}")
+                # Determine exit action (reverse of entry)
+                entry_action = action.upper() if action else 'BUY'
+                exit_action = 'SELL' if entry_action == 'BUY' else 'BUY'
+                exit_product = execution.product or strategy.product_order_type or 'MIS'
+
+                # CLAIM: Mark as exit_pending BEFORE placing order
+                # This prevents other processes from trying to exit this position
+                execution.status = 'exit_pending'
+                execution.exit_reason = exit_reason
+                execution.exit_time = datetime.utcnow()
+                db.session.commit()  # Commit immediately to claim this execution
+                print(f"[EXIT ORDER] CLAIMED: exec_id={execution_id}, status=exit_pending, account={account.account_name}", flush=True)
+
+                # Store values needed after lock is released
+                account_name = account.account_name
+                strategy_name = strategy.name
 
                 # Initialize OpenAlgo client with the execution's account
                 client = ExtendedOpenAlgoAPI(
@@ -1582,17 +1622,10 @@ def risk_status_stream():
                     host=account.host_url
                 )
 
-                # Determine exit action (reverse of entry)
-                entry_action = action.upper() if action else 'BUY'
-                exit_action = 'SELL' if entry_action == 'BUY' else 'BUY'
-
-                # Get product type - prefer execution's product, fallback to strategy's product_order_type
-                exit_product = execution.product or strategy.product_order_type or 'MIS'
-
-                # Place exit order using keyword arguments
-                app.logger.debug(f"[RISK MONITOR] Placing exit order on {account.account_name}: symbol={symbol}, action={exit_action}, qty={quantity}, product={exit_product}")
+                # Place exit order
+                print(f"[EXIT ORDER] PLACING: {exit_action} {quantity} {symbol} on {account_name}, product={exit_product}, reason={exit_reason}", flush=True)
                 response = client.placeorder(
-                    strategy=strategy.name,
+                    strategy=strategy_name,
                     symbol=symbol,
                     action=exit_action,
                     exchange=exchange,
@@ -1601,10 +1634,12 @@ def risk_status_stream():
                     quantity=str(quantity)
                 )
 
+                print(f"[EXIT ORDER] RESPONSE: exec_id={execution_id}, response={response}", flush=True)
+
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
 
-                    # Create Order record for orderbook/tradebook using execution's account
+                    # Create Order record
                     order = Order(
                         account_id=account.id,
                         order_id=order_id,
@@ -1618,34 +1653,52 @@ def risk_status_stream():
                     )
                     db.session.add(order)
 
-                    # Update execution
+                    # Update execution with order ID
                     execution = StrategyExecution.query.get(execution_id)
                     if execution:
-                        execution.status = 'exit_pending'
                         execution.exit_order_id = order_id
-                        execution.exit_reason = exit_reason
 
                     db.session.commit()
+                    print(f"[EXIT ORDER] SUCCESS: exec_id={execution_id}, order_id={order_id}, symbol={symbol}, account={account_name}, reason={exit_reason}", flush=True)
 
-                    # Add exit order to polling queue for status tracking (use execution's account)
+                    # Add exit order to polling queue for status tracking
                     order_status_poller.add_order(
                         execution_id=execution_id,
                         account=account,
                         order_id=order_id,
-                        strategy_name=strategy.name
+                        strategy_name=strategy_name
                     )
 
-                    print(f"[RISK MONITOR] Exit order {order_id} placed for {symbol} on {account.account_name}", flush=True)
                     return True
                 else:
                     error_msg = response.get('message', 'Unknown error')
-                    print(f"[RISK MONITOR] ERROR: Failed to place exit order: {error_msg}", flush=True)
+                    print(f"[EXIT ORDER] FAILED: exec_id={execution_id}, symbol={symbol}, account={account_name}, reason={exit_reason}, error={error_msg}", flush=True)
+                    # Revert to entered so retry mechanism can pick it up
+                    execution = StrategyExecution.query.get(execution_id)
+                    if execution and execution.status == 'exit_pending':
+                        execution.status = 'entered'
+                        execution.exit_reason = None
+                        execution.exit_time = None
+                        db.session.commit()
+                        print(f"[EXIT ORDER] REVERTED: exec_id={execution_id} back to 'entered' for retry", flush=True)
                     return False
 
         except Exception as e:
             import traceback
-            print(f"[RISK MONITOR] ERROR: Exception placing exit order: {str(e)}", flush=True)
-            print(f"[RISK MONITOR] Traceback: {traceback.format_exc()}", flush=True)
+            print(f"[EXIT ORDER] ERROR: exec_id={execution_id}, symbol={symbol}, exception={str(e)}", flush=True)
+            print(f"[EXIT ORDER] Traceback: {traceback.format_exc()}", flush=True)
+            # Try to revert status on exception
+            try:
+                with app.app_context():
+                    execution = StrategyExecution.query.get(execution_id)
+                    if execution and execution.status == 'exit_pending' and not execution.exit_order_id:
+                        execution.status = 'entered'
+                        execution.exit_reason = None
+                        execution.exit_time = None
+                        db.session.commit()
+                        print(f"[EXIT ORDER] REVERTED on error: exec_id={execution_id} back to 'entered'", flush=True)
+            except Exception:
+                pass
             return False
 
     def close_all_strategy_positions(strategy_id, exit_reason):
@@ -1662,6 +1715,7 @@ def risk_status_stream():
         Returns:
             bool: True if exit orders placed successfully
         """
+        from datetime import datetime
         from app.models import TradingAccount, Strategy, StrategyExecution, Order
         from app.utils.openalgo_client import ExtendedOpenAlgoAPI
         from app.utils.order_status_poller import order_status_poller
@@ -1673,10 +1727,12 @@ def risk_status_stream():
                     print(f"[RISK MONITOR] ERROR: Strategy {strategy_id} not found for {exit_reason}", flush=True)
                     return False
 
-                # Get all open executions
-                open_executions = StrategyExecution.query.filter_by(
-                    strategy_id=strategy_id,
-                    status='entered'
+                # Get all open executions (with improved filters)
+                open_executions = StrategyExecution.query.filter(
+                    StrategyExecution.strategy_id == strategy_id,
+                    StrategyExecution.status == 'entered',
+                    StrategyExecution.exit_order_id.is_(None),
+                    StrategyExecution.quantity > 0
                 ).all()
 
                 if not open_executions:
@@ -1695,22 +1751,48 @@ def risk_status_stream():
 
                 # Reorder: SELL positions first (will place BUY close orders), then BUY positions
                 ordered_executions = sell_positions + buy_positions + unknown_positions
+                # Collect execution IDs for row-level locking loop
+                execution_ids = [ex.id for ex in ordered_executions]
 
-                print(f"[RISK MONITOR] BUY-FIRST priority: {len(sell_positions)} SELL positions (close first), "
-                      f"{len(buy_positions)} BUY positions (close second)", flush=True)
+                print(f"[CLOSE ALL] {exit_reason.upper()}: BUY-FIRST priority: {len(sell_positions)} SELL positions (close first), "
+                      f"{len(buy_positions)} BUY positions (close second), exec_ids={execution_ids}", flush=True)
 
                 success_count = 0
                 sell_count = len(sell_positions)
 
-                for idx, execution in enumerate(ordered_executions):
+                for idx, exec_id in enumerate(execution_ids):
                     # Log phase transitions
                     if idx == sell_count and sell_positions and buy_positions:
-                        print(f"[RISK MONITOR PHASE 2] All SELL positions closed. Starting BUY position exits...", flush=True)
+                        print(f"[CLOSE ALL PHASE 2] All SELL positions closed. Starting BUY position exits...", flush=True)
                     try:
+                        # ATOMIC: Row-level lock to prevent concurrent exit attempts
+                        execution = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
+                        if not execution:
+                            print(f"[CLOSE ALL] SKIP: Execution {exec_id} not found", flush=True)
+                            continue
+
+                        # DUPLICATE GUARD: Check if exit already placed
+                        if execution.exit_order_id:
+                            print(f"[CLOSE ALL] SKIP DUPLICATE: exec_id={exec_id} ({execution.symbol}) exit_order_id={execution.exit_order_id}", flush=True)
+                            db.session.rollback()  # Release row lock
+                            continue
+                        if execution.status != 'entered':
+                            print(f"[CLOSE ALL] SKIP: exec_id={exec_id} ({execution.symbol}) status={execution.status}, not 'entered'", flush=True)
+                            db.session.rollback()  # Release row lock
+                            continue
+                        if not execution.quantity or execution.quantity <= 0:
+                            print(f"[CLOSE ALL] SKIP: exec_id={exec_id} ({execution.symbol}) quantity={execution.quantity}, marking as exited", flush=True)
+                            execution.status = 'exited'
+                            execution.exit_reason = f"{exit_reason}_no_quantity"
+                            execution.exit_time = datetime.utcnow()
+                            db.session.commit()
+                            continue
+
                         # Use the execution's account (NOT primary account)
                         account = execution.account
                         if not account or not account.is_active:
-                            print(f"[RISK MONITOR] ERROR: Account not found or inactive for execution {execution.id}", flush=True)
+                            print(f"[CLOSE ALL] SKIP: Account not found or inactive for exec_id={exec_id}", flush=True)
+                            db.session.rollback()
                             continue
 
                         # Get or create client for this account
@@ -1725,60 +1807,81 @@ def risk_status_stream():
                         leg = execution.leg
                         entry_action = leg.action.upper() if leg else 'BUY'
                         exit_action = 'SELL' if entry_action == 'BUY' else 'BUY'
-
-                        # Get product type - prefer execution's product, fallback to strategy's product_order_type
                         exit_product = execution.product or strategy.product_order_type or 'MIS'
-                        print(f"[RISK MONITOR] {exit_reason.upper()}: Placing exit order for {execution.symbol} on {account.account_name}, action={exit_action}, qty={execution.quantity}, product={exit_product}", flush=True)
+
+                        # CLAIM: Mark as exit_pending BEFORE placing order
+                        exec_symbol = execution.symbol
+                        exec_exchange = execution.exchange
+                        exec_quantity = execution.quantity
+                        execution.status = 'exit_pending'
+                        execution.exit_reason = exit_reason
+                        execution.exit_time = datetime.utcnow()
+                        db.session.commit()  # Commit to claim this execution
+                        print(f"[CLOSE ALL] CLAIMED: exec_id={exec_id}, symbol={exec_symbol}, account={account.account_name}", flush=True)
+
+                        # Place exit order
+                        print(f"[CLOSE ALL] PLACING: {exit_action} {exec_quantity} {exec_symbol} on {account.account_name}, product={exit_product}, reason={exit_reason}", flush=True)
                         response = client.placeorder(
                             strategy=strategy.name,
-                            symbol=execution.symbol,
+                            symbol=exec_symbol,
                             action=exit_action,
-                            exchange=execution.exchange,
+                            exchange=exec_exchange,
                             price_type='MARKET',
                             product=exit_product,
-                            quantity=str(execution.quantity)
+                            quantity=str(exec_quantity)
                         )
+
+                        print(f"[CLOSE ALL] RESPONSE: exec_id={exec_id}, response={response}", flush=True)
 
                         if response.get('status') == 'success':
                             order_id = response.get('orderid')
 
-                            # Create Order record for orderbook/tradebook (using execution's account)
+                            # Create Order record
                             order = Order(
                                 account_id=account.id,
                                 order_id=order_id,
-                                symbol=execution.symbol,
-                                exchange=execution.exchange,
+                                symbol=exec_symbol,
+                                exchange=exec_exchange,
                                 action=exit_action,
-                                quantity=execution.quantity,
+                                quantity=exec_quantity,
                                 order_type='MARKET',
                                 product=exit_product,
                                 status='pending'
                             )
                             db.session.add(order)
 
-                            execution.status = 'exit_pending'
-                            execution.exit_order_id = order_id
-                            execution.exit_reason = exit_reason
+                            execution = StrategyExecution.query.get(exec_id)
+                            if execution:
+                                execution.exit_order_id = order_id
+                            db.session.commit()
                             success_count += 1
 
-                            # Add exit order to polling queue (using execution's account)
+                            # Add exit order to polling queue
                             order_status_poller.add_order(
-                                execution_id=execution.id,
+                                execution_id=exec_id,
                                 account=account,
                                 order_id=order_id,
                                 strategy_name=strategy.name
                             )
 
-                            print(f"[RISK MONITOR] Exit order {order_id} placed for {execution.symbol} on {account.account_name}", flush=True)
+                            print(f"[CLOSE ALL] SUCCESS: exec_id={exec_id}, order_id={order_id}, symbol={exec_symbol}, account={account.account_name}", flush=True)
                         else:
-                            print(f"[RISK MONITOR] ERROR: Failed to place exit for {execution.symbol} on {account.account_name}: {response.get('message')}", flush=True)
+                            error_msg = response.get('message', 'Unknown error')
+                            print(f"[CLOSE ALL] FAILED: exec_id={exec_id}, symbol={exec_symbol}, error={error_msg}", flush=True)
+                            # Revert to entered for retry
+                            execution = StrategyExecution.query.get(exec_id)
+                            if execution and execution.status == 'exit_pending':
+                                execution.status = 'entered'
+                                execution.exit_reason = None
+                                execution.exit_time = None
+                                db.session.commit()
+                                print(f"[CLOSE ALL] REVERTED: exec_id={exec_id} back to 'entered'", flush=True)
 
                     except Exception as e:
-                        print(f"[RISK MONITOR] ERROR: Exception closing {execution.symbol}: {str(e)}", flush=True)
+                        print(f"[CLOSE ALL] ERROR: exec_id={exec_id}, exception={str(e)}", flush=True)
 
                 # Set triggered_at timestamp based on exit reason
                 if success_count > 0:
-                    from datetime import datetime
                     import pytz
                     ist = pytz.timezone('Asia/Kolkata')
                     now_ist = datetime.now(ist)
@@ -1854,6 +1957,11 @@ def risk_status_stream():
                         except Exception as e:
                             pass  # Non-critical, continue monitoring
                         refresh_counter = 0
+                    # Expire all cached objects to force fresh reads from DB
+                    # This prevents stale session identity map from missing exit_order_id
+                    # updates made by execute_leg_exit() in its own app_context
+                    db.session.expire_all()
+
                     # Get all active strategies with monitoring enabled
                     strategies = Strategy.query.filter_by(
                         user_id=user_id,
@@ -1958,7 +2066,7 @@ def risk_status_stream():
                                 sl_hit = True
                                 # RETRY MECHANISM: If SL was hit but position still open (no exit order), retry exit
                                 if not execution.exit_order_id and execution.status == 'entered':
-                                    print(f"[RISK MONITOR] RETRY: SL was hit but no exit order for {execution.symbol}, retrying...", flush=True)
+                                    print(f"[RISK MONITOR] RETRY SL: exec_id={execution.id}, symbol={execution.symbol}, sl_hit_at={execution.sl_hit_at}, sl_hit_price={execution.sl_hit_price}", flush=True)
                                     exit_success = execute_leg_exit(
                                         execution.id,
                                         execution.strategy_id,
@@ -1970,13 +2078,15 @@ def risk_status_stream():
                                         execution.sl_hit_price or 0
                                     )
                                     if exit_success:
-                                        print(f"[RISK MONITOR] RETRY SUCCESS: Exit order placed for {execution.symbol} (Stop Loss)", flush=True)
+                                        print(f"[RISK MONITOR] RETRY SL SUCCESS: exec_id={execution.id}, symbol={execution.symbol}", flush=True)
                                         exit_already_placed = True
+                                        # Expire to ensure next iteration sees updated exit_order_id
+                                        db.session.expire(execution)
                             if execution.tp_hit_at:
                                 tp_hit = True
                                 # RETRY MECHANISM: If TP was hit but position still open (no exit order), retry exit
                                 if not execution.exit_order_id and execution.status == 'entered':
-                                    print(f"[RISK MONITOR] RETRY: TP was hit but no exit order for {execution.symbol}, retrying...", flush=True)
+                                    print(f"[RISK MONITOR] RETRY TP: exec_id={execution.id}, symbol={execution.symbol}, tp_hit_at={execution.tp_hit_at}, tp_hit_price={execution.tp_hit_price}", flush=True)
                                     exit_success = execute_leg_exit(
                                         execution.id,
                                         execution.strategy_id,
@@ -1988,8 +2098,10 @@ def risk_status_stream():
                                         execution.tp_hit_price or 0
                                     )
                                     if exit_success:
-                                        print(f"[RISK MONITOR] RETRY SUCCESS: Exit order placed for {execution.symbol} (Take Profit)", flush=True)
+                                        print(f"[RISK MONITOR] RETRY TP SUCCESS: exec_id={execution.id}, symbol={execution.symbol}", flush=True)
                                         exit_already_placed = True
+                                        # Expire to ensure next iteration sees updated exit_order_id
+                                        db.session.expire(execution)
 
                             if leg and entry_price > 0:
                                 # Stop Loss calculation
@@ -2012,7 +2124,7 @@ def risk_status_stream():
                                             execution.sl_hit_price = last_price
                                             db.session.commit()
                                             # Log the SL hit event
-                                            print(f"[RISK MONITOR] STOP LOSS HIT! Symbol: {execution.symbol}, Entry: {entry_price}, SL Price: {sl_price}, Hit Price: {last_price}, Action: {action}", flush=True)
+                                            print(f"[RISK MONITOR] SL HIT: exec_id={execution.id}, symbol={execution.symbol}, entry={entry_price}, sl_price={sl_price}, ltp={last_price}, action={action}, sl_type={leg.stop_loss_type}, sl_value={leg.stop_loss_value}", flush=True)
                                             # Execute exit order for this leg
                                             exit_success = execute_leg_exit(
                                                 execution.id,
@@ -2025,7 +2137,11 @@ def risk_status_stream():
                                                 sl_price
                                             )
                                             if exit_success:
-                                                print(f"[RISK MONITOR] Exit order placed for {execution.symbol} (Stop Loss)", flush=True)
+                                                print(f"[RISK MONITOR] SL EXIT OK: exec_id={execution.id}, symbol={execution.symbol}", flush=True)
+                                                # Expire to ensure next iteration sees updated exit_order_id
+                                                db.session.expire(execution)
+                                            else:
+                                                print(f"[RISK MONITOR] SL EXIT FAILED: exec_id={execution.id}, symbol={execution.symbol} - will retry next iteration", flush=True)
                                     elif sl_hit:
                                         # Already hit - show distance from hit price
                                         sl_distance = 0
@@ -2050,7 +2166,7 @@ def risk_status_stream():
                                             execution.tp_hit_price = last_price
                                             db.session.commit()
                                             # Log the TP hit event
-                                            print(f"[RISK MONITOR] TAKE PROFIT HIT! Symbol: {execution.symbol}, Entry: {entry_price}, TP Price: {tp_price}, Hit Price: {last_price}, Action: {action}", flush=True)
+                                            print(f"[RISK MONITOR] TP HIT: exec_id={execution.id}, symbol={execution.symbol}, entry={entry_price}, tp_price={tp_price}, ltp={last_price}, action={action}, tp_type={leg.take_profit_type}, tp_value={leg.take_profit_value}", flush=True)
                                             # Execute exit order for this leg
                                             exit_success = execute_leg_exit(
                                                 execution.id,
@@ -2063,7 +2179,11 @@ def risk_status_stream():
                                                 tp_price
                                             )
                                             if exit_success:
-                                                print(f"[RISK MONITOR] Exit order placed for {execution.symbol} (Take Profit)", flush=True)
+                                                print(f"[RISK MONITOR] TP EXIT OK: exec_id={execution.id}, symbol={execution.symbol}", flush=True)
+                                                # Expire to ensure next iteration sees updated exit_order_id
+                                                db.session.expire(execution)
+                                            else:
+                                                print(f"[RISK MONITOR] TP EXIT FAILED: exec_id={execution.id}, symbol={execution.symbol} - will retry next iteration", flush=True)
                                     elif tp_hit:
                                         # Already hit - show distance from hit price
                                         tp_distance = 0
@@ -2132,6 +2252,94 @@ def risk_status_stream():
                                     if still_open:
                                         print(f"[RISK MONITOR] MAX PROFIT HIT! Strategy: {strategy.name}, P&L: {total_pnl}, Threshold: {strategy.max_profit}", flush=True)
                                         close_all_strategy_positions(strategy.id, 'max_profit')
+
+                        # ============================================================
+                        # TRAILING STOP LOSS (AFL-style ratcheting)
+                        # Ported from risk_manager.py:check_trailing_sl() to ensure
+                        # TSL exits work even when risk_manager's price pipeline fails
+                        # ============================================================
+                        if (strategy.trailing_sl and strategy.trailing_sl > 0
+                                and not strategy.trailing_sl_triggered_at):
+                            # Only process TSL if we have at least one position with real-time price
+                            has_realtime = any(
+                                e.get('price_source') == 'realtime' and e.get('status') == 'entered'
+                                for e in executions_data
+                            )
+                            open_entered = [e for e in open_executions if e.status == 'entered']
+
+                            if has_realtime and open_entered and abs(total_pnl) >= 0.01:
+                                trailing_type = strategy.trailing_sl_type or 'percentage'
+                                trailing_value = float(strategy.trailing_sl)
+
+                                # Calculate net premium from open executions
+                                net_premium = 0
+                                for ex in open_entered:
+                                    if ex.entry_price and ex.quantity:
+                                        premium = (ex.entry_price or 0) * (ex.quantity or 0)
+                                        leg = ex.leg
+                                        if leg and leg.action and leg.action.upper() == 'BUY':
+                                            net_premium += premium
+                                        else:
+                                            net_premium -= premium
+
+                                entry_value = abs(net_premium)
+
+                                # Calculate initial stop
+                                if trailing_type == 'percentage':
+                                    initial_stop_pnl = -entry_value * (trailing_value / 100)
+                                elif trailing_type == 'points':
+                                    initial_stop_pnl = -trailing_value
+                                else:
+                                    initial_stop_pnl = -trailing_value
+
+                                # Always recalculate initial stop based on current open positions
+                                # This handles multi-leg strategies where legs fill at different times
+                                # (BUY-FIRST execution means SELL legs fill after BUY legs)
+                                if strategy.trailing_sl_initial_stop is None or abs(strategy.trailing_sl_initial_stop - initial_stop_pnl) > 0.01:
+                                    old_stop = strategy.trailing_sl_initial_stop
+                                    strategy.trailing_sl_initial_stop = initial_stop_pnl
+                                    if old_stop is None:
+                                        print(f"[TSL SSE] {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (net_premium={net_premium:.2f}, entry_value={entry_value:.2f})", flush=True)
+                                    else:
+                                        print(f"[TSL SSE] {strategy.name}: Initial stop RECALCULATED {old_stop:.2f} -> {initial_stop_pnl:.2f} (legs changed, net_premium={net_premium:.2f})", flush=True)
+
+                                strategy.trailing_sl_active = True
+
+                                # Track peak P&L (ratchet up only)
+                                current_peak = strategy.trailing_sl_peak_pnl or 0.0
+                                if total_pnl > current_peak:
+                                    strategy.trailing_sl_peak_pnl = total_pnl
+                                    current_peak = total_pnl
+
+                                # Calculate trailing stop: Initial Stop + Peak P&L
+                                current_stop = strategy.trailing_sl_initial_stop + current_peak
+
+                                # Ratchet: stop can only move UP
+                                previous_stop = strategy.trailing_sl_trigger_pnl or strategy.trailing_sl_initial_stop
+                                current_stop = max(current_stop, previous_stop)
+
+                                strategy.trailing_sl_trigger_pnl = current_stop
+                                db.session.commit()
+
+                                # Skip near-zero P&L (likely stale price)
+                                if abs(total_pnl) < 1.0 and len(open_entered) > 0:
+                                    pass  # Don't trigger on near-zero P&L
+                                elif total_pnl <= current_stop:
+                                    # TSL TRIGGERED - close all positions
+                                    import pytz
+                                    ist = pytz.timezone('Asia/Kolkata')
+                                    now_ist = datetime.now(ist)
+
+                                    exit_reason = f"TSL: P&L {total_pnl:.2f} <= Stop {current_stop:.2f} (Peak: {current_peak:.2f}, Initial: {strategy.trailing_sl_initial_stop:.2f})"
+                                    strategy.trailing_sl_triggered_at = now_ist
+                                    strategy.trailing_sl_exit_reason = exit_reason
+                                    db.session.commit()
+
+                                    print(f"[TSL SSE TRIGGERED] {strategy.name}: P&L={total_pnl:.2f} <= Stop={current_stop:.2f} (Peak={current_peak:.2f})", flush=True)
+
+                                    still_open = any(e.status == 'entered' and not e.exit_order_id for e in open_executions)
+                                    if still_open:
+                                        close_all_strategy_positions(strategy.id, 'trailing_sl')
 
                         risk_data.append({
                             'strategy_id': strategy.id,

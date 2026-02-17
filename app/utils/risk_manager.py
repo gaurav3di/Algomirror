@@ -272,6 +272,7 @@ class RiskManager:
         # OPTIMIZATION: Skip API calls if outside trading hours
         if not self._is_within_trading_hours():
             logger.debug("Outside trading hours - skipping API price fetch")
+            print("[PRICE FETCH] SKIPPED: Outside trading hours", flush=True)
             return {}
 
         # Get all active accounts ordered by: primary first, then by id
@@ -284,6 +285,7 @@ class RiskManager:
 
         if not accounts:
             logger.warning("No active accounts available for price feeds")
+            print("[PRICE FETCH] SKIPPED: No active accounts", flush=True)
             return {}
 
         # OPTIMIZATION: If we have a known working account, try it first
@@ -333,11 +335,13 @@ class RiskManager:
             else:
                 # Failed - mark account and try next
                 self._failed_accounts[account.id] = now
+                print(f"[PRICE FETCH] Account {account.account_name}: positionbook returned empty", flush=True)
                 logger.warning(f"Price feed failed for account {account.account_name}, trying next...")
 
         # All attempts failed
         if attempts == 0 and skipped_due_to_cooldown > 0:
             # All accounts in cooldown - clear cooldown and try again next cycle
+            print(f"[PRICE FETCH] All {skipped_due_to_cooldown} accounts in cooldown", flush=True)
             logger.warning(f"All {skipped_due_to_cooldown} accounts in cooldown (failed recently). Will retry in {self._failed_account_cooldown}s")
             # Reduce cooldown for next attempt if all accounts failed
             if len(self._failed_accounts) == len(accounts):
@@ -436,6 +440,12 @@ class RiskManager:
                     ltp = pos.get('ltp', 0)
                     if symbol and ltp:
                         current_prices[symbol] = float(ltp)
+                if not current_prices and positions_data:
+                    # API returned positions but no symbol+ltp matched
+                    symbols_in_response = [p.get('symbol', '?') for p in positions_data[:5]]
+                    print(f"[PRICE FETCH] Positionbook has {len(positions_data)} positions but 0 matched. Symbols: {symbols_in_response}", flush=True)
+            else:
+                print(f"[PRICE FETCH] Positionbook response status: {positions_response.get('status')}, msg: {positions_response.get('message', 'N/A')}", flush=True)
 
             # Update cache
             self._positions_cache[account.id] = {
@@ -956,10 +966,17 @@ class RiskManager:
             else:  # 'amount'
                 initial_stop_pnl = -trailing_value
 
-            # Set initial stop if not already set
-            if strategy.trailing_sl_initial_stop is None:
+            # Always recalculate initial stop based on current open positions
+            # This handles multi-leg strategies where legs fill at different times
+            # (BUY-FIRST execution means SELL legs fill after BUY legs)
+            if strategy.trailing_sl_initial_stop is None or abs(strategy.trailing_sl_initial_stop - initial_stop_pnl) > 0.01:
+                old_stop = strategy.trailing_sl_initial_stop
                 strategy.trailing_sl_initial_stop = initial_stop_pnl
-                logger.debug(f"[TSL STATE] Strategy {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (Net Premium: {net_premium:.2f}, Entry Value: {entry_value:.2f})")
+                if old_stop is None:
+                    logger.debug(f"[TSL STATE] Strategy {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (Net Premium: {net_premium:.2f}, Entry Value: {entry_value:.2f})")
+                else:
+                    logger.info(f"[TSL STATE] Strategy {strategy.name}: Initial stop RECALCULATED {old_stop:.2f} -> {initial_stop_pnl:.2f} (legs changed)")
+                    print(f"[TSL] {strategy.name}: Initial stop RECALCULATED {old_stop:.2f} -> {initial_stop_pnl:.2f} (net_premium={net_premium:.2f})", flush=True)
 
             # TSL is ALWAYS active from entry (no waiting state)
             strategy.trailing_sl_active = True
@@ -1488,6 +1505,10 @@ class RiskManager:
             return
 
         try:
+            # Expire all cached objects to force fresh reads from DB
+            # Ensures we see latest execution.last_price from WebSocket updates
+            db.session.expire_all()
+
             # OPTIMIZED: Get strategy IDs with open positions in a single query
             # Then fetch strategies - avoids N+1 pattern while respecting dynamic relationship
             from sqlalchemy import exists, or_

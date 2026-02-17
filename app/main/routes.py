@@ -302,7 +302,9 @@ def close_account_positions(account_id):
     from app.models import Strategy, StrategyExecution, StrategyLeg
     from app.utils.openalgo_client import ExtendedOpenAlgoAPI
     from app.utils.freeze_quantity_handler import place_order_with_freeze_check
-    from app import create_app
+
+    # Capture app reference before spawning threads
+    app = current_app._get_current_object()
 
     # Verify account ownership
     account = TradingAccount.query.filter_by(
@@ -350,41 +352,89 @@ def close_account_positions(account_id):
         if delay > 0:
             time_module.sleep(delay)
 
-        # Create Flask app context for this thread
-        app = create_app()
-
         with app.app_context():
             try:
-                # Get fresh execution from database
-                exec_to_close = StrategyExecution.query.get(execution.id)
+                exec_id = execution.id
+                exec_symbol = execution.symbol
+
+                # ATOMIC: Row-level lock to prevent concurrent exit attempts
+                exec_to_close = StrategyExecution.query.with_for_update(nowait=False).get(exec_id)
                 if not exec_to_close:
+                    print(f"[ACCOUNT CLOSE] SKIP: exec_id={exec_id} not found", flush=True)
                     with results_lock:
                         results.append({
-                            'symbol': execution.symbol,
+                            'symbol': exec_symbol,
                             'status': 'error',
                             'error': 'Position not found'
                         })
                     return
 
-                leg = StrategyLeg.query.get(exec_to_close.leg_id)
-                if not leg:
+                # DUPLICATE GUARD: Check if exit already placed
+                if exec_to_close.exit_order_id:
+                    print(f"[ACCOUNT CLOSE] SKIP DUPLICATE: exec_id={exec_id} ({exec_to_close.symbol}) exit_order_id={exec_to_close.exit_order_id}", flush=True)
+                    db.session.rollback()  # Release row lock
                     with results_lock:
                         results.append({
-                            'symbol': execution.symbol,
+                            'symbol': exec_to_close.symbol,
+                            'status': 'skipped',
+                            'error': 'Exit already placed'
+                        })
+                    return
+                if exec_to_close.status != 'entered':
+                    print(f"[ACCOUNT CLOSE] SKIP: exec_id={exec_id} ({exec_to_close.symbol}) status={exec_to_close.status}, not 'entered'", flush=True)
+                    db.session.rollback()  # Release row lock
+                    with results_lock:
+                        results.append({
+                            'symbol': exec_to_close.symbol,
+                            'status': 'skipped',
+                            'error': f'Status is {exec_to_close.status}'
+                        })
+                    return
+                if not exec_to_close.quantity or exec_to_close.quantity <= 0:
+                    print(f"[ACCOUNT CLOSE] SKIP: exec_id={exec_id} ({exec_to_close.symbol}) quantity={exec_to_close.quantity}, marking as exited", flush=True)
+                    exec_to_close.status = 'exited'
+                    exec_to_close.exit_reason = 'account_close_all_no_quantity'
+                    exec_to_close.exit_time = datetime.utcnow()
+                    db.session.commit()
+                    with results_lock:
+                        results.append({
+                            'symbol': exec_to_close.symbol,
+                            'status': 'skipped',
+                            'error': 'No quantity'
+                        })
+                    return
+
+                leg = StrategyLeg.query.get(exec_to_close.leg_id)
+                if not leg:
+                    print(f"[ACCOUNT CLOSE] SKIP: exec_id={exec_id} leg not found", flush=True)
+                    db.session.rollback()
+                    with results_lock:
+                        results.append({
+                            'symbol': exec_symbol,
                             'status': 'error',
                             'error': 'Leg not found'
                         })
                     return
 
-                # Get strategy for product type - prefer execution's product first
+                # Get strategy for product type
                 strategy = Strategy.query.get(exec_to_close.strategy_id)
-                # Use execution.product first (preserves original entry product type),
-                # then strategy.product_order_type, then default to MIS
                 product_type = exec_to_close.product or (strategy.product_order_type if strategy else None) or 'MIS'
-                current_app.logger.debug(f"[EXIT PRODUCT] execution.product='{exec_to_close.product}', strategy.product_order_type='{strategy.product_order_type if strategy else None}', using='{product_type}'")
+
+                # CLAIM: Mark as exit_pending BEFORE placing order
+                close_symbol = exec_to_close.symbol
+                close_exchange = exec_to_close.exchange
+                close_quantity = exec_to_close.quantity
+                close_entry_price = exec_to_close.entry_price
+                close_account_id = exec_to_close.account_id
+
+                exec_to_close.status = 'exit_pending'
+                exec_to_close.exit_reason = 'account_close_all'
+                exec_to_close.exit_time = datetime.utcnow()
+                db.session.commit()  # Commit to claim this execution
+                print(f"[ACCOUNT CLOSE] CLAIMED: exec_id={exec_id}, symbol={close_symbol}", flush=True)
 
                 # Initialize client
-                acct = TradingAccount.query.get(exec_to_close.account_id)
+                acct = TradingAccount.query.get(close_account_id)
                 client = ExtendedOpenAlgoAPI(
                     api_key=acct.get_api_key(),
                     host=acct.host_url
@@ -393,7 +443,7 @@ def close_account_positions(account_id):
                 # Determine exit action (opposite of entry)
                 exit_action = 'SELL' if leg.action == 'BUY' else 'BUY'
 
-                current_app.logger.debug(f"[THREAD {thread_index}] Closing: {exit_action} {exec_to_close.quantity} {exec_to_close.symbol}")
+                print(f"[ACCOUNT CLOSE] PLACING: {exit_action} {close_quantity} {close_symbol} on {acct.account_name}", flush=True)
 
                 # Place close order with freeze-aware placement and retry logic
                 max_retries = 3
@@ -406,67 +456,88 @@ def close_account_positions(account_id):
                             client=client,
                             user_id=user_id,
                             strategy=strategy.name if strategy else 'AccountClose',
-                            symbol=exec_to_close.symbol,
-                            exchange=exec_to_close.exchange,
+                            symbol=close_symbol,
+                            exchange=close_exchange,
                             action=exit_action,
-                            quantity=exec_to_close.quantity,
+                            quantity=close_quantity,
                             price_type='MARKET',
                             product=product_type
                         )
                         if response and isinstance(response, dict):
                             break
                     except Exception as api_error:
-                        current_app.logger.warning(f"[RETRY] Attempt {attempt + 1}/{max_retries} failed: {api_error}")
+                        print(f"[ACCOUNT CLOSE] RETRY: exec_id={exec_id}, attempt {attempt + 1}/{max_retries}, error={api_error}", flush=True)
                         if attempt < max_retries - 1:
                             time_module.sleep(retry_delay)
                             retry_delay *= 2
                         else:
                             response = {'status': 'error', 'message': f'API error after {max_retries} retries'}
 
+                print(f"[ACCOUNT CLOSE] RESPONSE: exec_id={exec_id}, response={response}", flush=True)
+
                 if response and response.get('status') == 'success':
+                    order_id = response.get('orderid')
                     # Update execution record
-                    exec_to_close.status = 'exited'
-                    exec_to_close.exit_order_id = response.get('orderid')
-                    exec_to_close.exit_time = datetime.utcnow()
-                    exec_to_close.exit_reason = 'account_close_all'
-                    exec_to_close.broker_order_status = 'complete'
+                    exec_to_close = StrategyExecution.query.get(exec_id)
+                    if exec_to_close:
+                        exec_to_close.status = 'exited'
+                        exec_to_close.exit_order_id = order_id
+                        exec_to_close.broker_order_status = 'complete'
 
-                    # Fetch exit price
-                    try:
-                        quote = client.quotes(symbol=exec_to_close.symbol, exchange=exec_to_close.exchange)
-                        exec_to_close.exit_price = float(quote.get('data', {}).get('ltp', 0))
-                    except Exception:
-                        exec_to_close.exit_price = exec_to_close.entry_price
+                        # Fetch exit price
+                        try:
+                            quote = client.quotes(symbol=close_symbol, exchange=close_exchange)
+                            exec_to_close.exit_price = float(quote.get('data', {}).get('ltp', 0))
+                        except Exception:
+                            exec_to_close.exit_price = close_entry_price
 
-                    # Calculate realized P&L
-                    if leg.action == 'BUY':
-                        exec_to_close.realized_pnl = (exec_to_close.exit_price - exec_to_close.entry_price) * exec_to_close.quantity
-                    else:
-                        exec_to_close.realized_pnl = (exec_to_close.entry_price - exec_to_close.exit_price) * exec_to_close.quantity
+                        # Calculate realized P&L
+                        if leg.action == 'BUY':
+                            exec_to_close.realized_pnl = (exec_to_close.exit_price - close_entry_price) * close_quantity
+                        else:
+                            exec_to_close.realized_pnl = (close_entry_price - exec_to_close.exit_price) * close_quantity
 
                     db.session.commit()
-
-                    current_app.logger.debug(f"[THREAD {thread_index}] SUCCESS: {exec_to_close.symbol}, P&L: {exec_to_close.realized_pnl:.2f}")
+                    pnl = exec_to_close.realized_pnl if exec_to_close else 0
+                    print(f"[ACCOUNT CLOSE] SUCCESS: exec_id={exec_id}, order_id={order_id}, symbol={close_symbol}, pnl={pnl:.2f}", flush=True)
 
                     with results_lock:
                         results.append({
-                            'symbol': exec_to_close.symbol,
+                            'symbol': close_symbol,
                             'status': 'success',
-                            'pnl': exec_to_close.realized_pnl
+                            'pnl': pnl
                         })
                 else:
                     error_msg = response.get('message', 'Unknown error') if response else 'No response'
-                    current_app.logger.error(f"[THREAD {thread_index}] FAILED: {exec_to_close.symbol}: {error_msg}")
+                    print(f"[ACCOUNT CLOSE] FAILED: exec_id={exec_id}, symbol={close_symbol}, error={error_msg}", flush=True)
+                    # Revert to entered for potential retry
+                    exec_to_close = StrategyExecution.query.get(exec_id)
+                    if exec_to_close and exec_to_close.status == 'exit_pending' and not exec_to_close.exit_order_id:
+                        exec_to_close.status = 'entered'
+                        exec_to_close.exit_reason = None
+                        exec_to_close.exit_time = None
+                        db.session.commit()
+                        print(f"[ACCOUNT CLOSE] REVERTED: exec_id={exec_id} back to 'entered'", flush=True)
 
                     with results_lock:
                         results.append({
-                            'symbol': exec_to_close.symbol,
+                            'symbol': close_symbol,
                             'status': 'failed',
                             'error': error_msg
                         })
 
             except Exception as e:
-                current_app.logger.error(f"[THREAD {thread_index}] ERROR: {execution.symbol}: {str(e)}", exc_info=True)
+                print(f"[ACCOUNT CLOSE] ERROR: exec_id={execution.id}, symbol={execution.symbol}, exception={str(e)}", flush=True)
+                # Try to revert on exception
+                try:
+                    exec_to_close = StrategyExecution.query.get(execution.id)
+                    if exec_to_close and exec_to_close.status == 'exit_pending' and not exec_to_close.exit_order_id:
+                        exec_to_close.status = 'entered'
+                        exec_to_close.exit_reason = None
+                        exec_to_close.exit_time = None
+                        db.session.commit()
+                except Exception:
+                    pass
                 with results_lock:
                     results.append({
                         'symbol': execution.symbol,

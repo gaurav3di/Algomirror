@@ -2506,9 +2506,6 @@ function updateRiskStatusDisplay(data) {
         maxProfitStatus.className = 'badge badge-success badge-sm ml-1';
     }
 
-    // NOTE: TSL status is now updated by updateTrailingSLDisplay() called from refreshPositions()
-    // The SSE stream doesn't have full TSL state, so we skip updating TSL here to prevent flickering
-
     // Update leg-level SL/TP tracking table
     const legRiskTracking = document.getElementById('legRiskTracking');
     const legRiskTableBody = document.getElementById('legRiskTableBody');
@@ -2879,7 +2876,7 @@ function updateRiskStatusHTML(strategyData) {
     if (strategyData.trailing_sl) {
         const tslType = strategyData.trailing_sl_type === 'percentage' ? '%' : (strategyData.trailing_sl_type === 'points' ? ' pts' : '');
         trailingSLHtml = `
-            <div class="bg-base-100 rounded-lg p-3" id="trailingSLCard">
+            <div class="bg-base-100 rounded-lg p-3" id="riskTrailingSLCard">
                 <div class="flex justify-between text-sm mb-2">
                     <span class="flex items-center gap-1">
                         <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2889,13 +2886,32 @@ function updateRiskStatusHTML(strategyData) {
                     </span>
                     <span class="font-mono font-bold">${strategyData.trailing_sl}${tslType}</span>
                 </div>
-                <div class="text-sm">
+                <div class="text-sm mb-2">
                     <span class="text-base-content/60">Status:</span>
-                    <span class="badge badge-warning badge-sm ml-1" id="riskTrailingSLStatus">Active</span>
+                    <span class="badge badge-ghost badge-sm ml-1" id="riskTrailingSLStatus">Waiting</span>
                 </div>
-                <div class="text-xs mt-2">
-                    <span class="text-base-content/60">Peak P&L:</span>
-                    <span id="riskTrailingSLPeak">--</span>
+                <div class="grid grid-cols-2 gap-2 text-xs mt-2">
+                    <div>
+                        <span class="text-base-content/60">Peak P&L:</span>
+                        <span class="font-mono text-success" id="riskTrailingSLPeak">₹0.00</span>
+                    </div>
+                    <div>
+                        <span class="text-base-content/60">Initial Stop:</span>
+                        <span class="font-mono text-warning" id="riskTrailingSLInitial">--</span>
+                    </div>
+                </div>
+                <div class="text-xs mt-1">
+                    <span class="text-base-content/60">Current Stop:</span>
+                    <span class="font-mono text-error font-bold" id="riskTrailingSLTrigger">--</span>
+                    <span class="text-base-content/40 text-[10px]">(ratchets up)</span>
+                </div>
+                <div class="text-sm mt-2 hidden" id="riskTrailingSLReasonDiv">
+                    <span class="text-base-content/60">Reason:</span>
+                    <span class="text-error text-xs ml-1" id="riskTrailingSLReason"></span>
+                </div>
+                <div class="text-sm mt-1 hidden" id="riskTrailingSLTimeDiv">
+                    <span class="text-base-content/60">Time:</span>
+                    <span class="text-xs ml-1" id="riskTrailingSLTime"></span>
                 </div>
             </div>
         `;
@@ -3483,11 +3499,10 @@ async function loadPositions(strategyId) {
 function updateTrailingSLDisplay(tslStatus) {
     const statusEl = document.getElementById('riskTrailingSLStatus');
     const triggerEl = document.getElementById('riskTrailingSLTrigger');
-
-    console.log('TSL Status update:', tslStatus);
+    const peakEl = document.getElementById('riskTrailingSLPeak');
+    const initialEl = document.getElementById('riskTrailingSLInitial');
 
     if (!statusEl) {
-        console.log('TSL status element not found');
         return;
     }
 
@@ -3495,6 +3510,8 @@ function updateTrailingSLDisplay(tslStatus) {
         statusEl.textContent = 'Disabled';
         statusEl.className = 'badge badge-ghost badge-sm ml-1';
         if (triggerEl) triggerEl.textContent = '--';
+        if (peakEl) peakEl.textContent = '--';
+        if (initialEl) initialEl.textContent = '--';
         return;
     }
 
@@ -3502,8 +3519,18 @@ function updateTrailingSLDisplay(tslStatus) {
     if (tslStatus.no_positions) {
         statusEl.textContent = 'No Positions';
         statusEl.className = 'badge badge-ghost badge-sm ml-1';
-        if (triggerEl) triggerEl.textContent = 'Open a position to activate';
+        if (triggerEl) triggerEl.textContent = '--';
+        if (peakEl) peakEl.textContent = '--';
+        if (initialEl) initialEl.textContent = '--';
         return;
+    }
+
+    // Update Peak P&L and Initial Stop
+    if (peakEl && tslStatus.peak_pnl !== undefined && tslStatus.peak_pnl !== null) {
+        peakEl.textContent = `₹${parseFloat(tslStatus.peak_pnl).toFixed(2)}`;
+    }
+    if (initialEl && tslStatus.initial_stop !== undefined && tslStatus.initial_stop !== null) {
+        initialEl.textContent = `₹${parseFloat(tslStatus.initial_stop).toFixed(2)}`;
     }
 
     // Check if TSL should trigger exit
@@ -3511,7 +3538,7 @@ function updateTrailingSLDisplay(tslStatus) {
         statusEl.textContent = 'TRIGGERED!';
         statusEl.className = 'badge badge-error badge-sm ml-1 animate-pulse';
         if (triggerEl) {
-            triggerEl.innerHTML = `<span class="text-error">Exit signal! P&L dropped below ₹${tslStatus.trigger_pnl?.toFixed(2) || 0}</span>`;
+            triggerEl.textContent = `₹${parseFloat(tslStatus.trigger_pnl || 0).toFixed(2)}`;
         }
         return;
     }
@@ -3529,7 +3556,7 @@ function updateTrailingSLDisplay(tslStatus) {
             statusEl.className = 'badge badge-success badge-sm ml-1';
         } else {
             statusEl.textContent = 'Active';
-            statusEl.className = 'badge badge-info badge-sm ml-1';
+            statusEl.className = 'badge badge-warning badge-sm ml-1';
         }
 
         // Show current stop level
@@ -3538,7 +3565,7 @@ function updateTrailingSLDisplay(tslStatus) {
         }
     } else {
         // TSL enabled but no positions yet
-        statusEl.textContent = 'No Position';
+        statusEl.textContent = 'Waiting';
         statusEl.className = 'badge badge-ghost badge-sm ml-1';
 
         if (triggerEl) {

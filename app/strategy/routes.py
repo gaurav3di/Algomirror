@@ -1,4 +1,4 @@
-from flask import render_template, request, jsonify, flash, redirect, url_for
+from flask import render_template, request, jsonify, flash, redirect, url_for, current_app
 from flask_login import login_required, current_user
 from app import db
 from app.strategy import strategy_bp
@@ -1670,7 +1670,9 @@ def close_all_positions(strategy_id):
             }), 400
 
         from app.utils.openalgo_client import ExtendedOpenAlgoAPI
-        from app import create_app
+
+        # Capture app reference before spawning threads
+        app = current_app._get_current_object()
 
         # Thread-safe results collection
         results = []
@@ -1695,9 +1697,6 @@ def close_all_positions(strategy_id):
 
             # Store position ID for atomic claim
             position_id = position.id
-
-            # Create Flask app context for this thread
-            app = create_app()
 
             with app.app_context():
                 try:
@@ -2266,7 +2265,9 @@ def close_leg_all_accounts(strategy_id):
             }), 400
 
         from app.utils.openalgo_client import ExtendedOpenAlgoAPI
-        from app import create_app
+
+        # Capture app reference before spawning threads
+        app = current_app._get_current_object()
 
         # Thread-safe results collection
         results = []
@@ -2284,9 +2285,6 @@ def close_leg_all_accounts(strategy_id):
             if delay > 0:
                 time.sleep(delay)
                 logger.debug(f"[THREAD {thread_index}] Waited {delay:.2f}s to prevent race condition")
-
-            # Create Flask app context for this thread
-            app = create_app()
 
             with app.app_context():
                 try:

@@ -392,14 +392,14 @@ class StrategyExecutor:
         Execute a single leg across all accounts (called in parallel with other legs)
         Greenlet-safe version that appends to shared results list
         """
+        import time as time_module
+        leg_start = time_module.time()
+        print(f"[LEG {leg.leg_number} THREAD] STARTED: {leg.instrument} {leg.action} {leg.option_type if leg.product_type == 'options' else ''}", flush=True)
+
         try:
-            # Create fresh app context for this thread (similar to _monitor_exit_conditions)
-            from app import create_app
-            app = create_app()
+            app = self.app
 
             with app.app_context():
-                logger.debug(f"[LEG {leg.leg_number}] [STARTING] Starting parallel execution")
-
                 # Reuse existing _execute_leg logic
                 leg_results = self._execute_leg(leg)
 
@@ -407,9 +407,12 @@ class StrategyExecutor:
                 with results_lock:
                     results.extend(leg_results)
 
-                logger.debug(f"[LEG {leg.leg_number}] [COMPLETED] Completed: {len(leg_results)} orders")
+                leg_duration = time_module.time() - leg_start
+                print(f"[LEG {leg.leg_number} THREAD] COMPLETED: {len(leg_results)} orders in {leg_duration:.2f}s", flush=True)
 
         except Exception as e:
+            leg_duration = time_module.time() - leg_start
+            print(f"[LEG {leg.leg_number} THREAD] ERROR after {leg_duration:.2f}s: {e}", flush=True)
             logger.error(f"[LEG {leg.leg_number}] [ERROR] Error: {e}", exc_info=True)
             with results_lock:
                 results.append({
@@ -646,17 +649,17 @@ class StrategyExecutor:
         # Add staggered delay based on thread index to prevent OpenAlgo race condition
         # Each thread waits: index * 300ms (0ms, 300ms, 600ms, 900ms, ...)
         # This GUARANTEES threads never hit OpenAlgo at the same time
+        import time as time_module
+        thread_start = time_module.time()
         delay = thread_index * 0.3
         if delay > 0:
             sleep(delay)
-            logger.debug(f"[TASK {thread_index}] Waited {delay:.2f}s to prevent race condition")
+            print(f"[THREAD {thread_index}] Leg {leg.leg_number}, account={account.account_name}: waited {delay:.2f}s stagger delay", flush=True)
 
         account_name = account.account_name
-        logger.debug(f"[THREAD START] Executing leg {leg.leg_number} on account {account_name}: {symbol} {leg.action} qty={quantity}")
+        print(f"[THREAD {thread_index}] Leg {leg.leg_number}, account={account_name}: STARTED - {symbol} {leg.action} qty={quantity}", flush=True)
 
-        # Create fresh app context for this thread to avoid session conflicts
-        from app import create_app
-        app = create_app()
+        app = self.app
 
         with app.app_context():
             try:
@@ -691,7 +694,8 @@ class StrategyExecutor:
                     if leg.limit_price:
                         order_params['price'] = leg.limit_price
 
-                print(f"[ORDER PARAMS] Placing order for {account_name}: {order_params}")
+                import time as time_module
+                print(f"[ORDER PARAMS] Placing order for {account_name}: {order_params}", flush=True)
                 logger.debug(f"Order params: {order_params}")
 
                 # Place order with freeze quantity check and retry logic for reliability
@@ -705,12 +709,15 @@ class StrategyExecutor:
                 for attempt in range(max_retries):
                     try:
                         # Use freeze-aware order placement
+                        api_start = time_module.time()
+                        print(f"[ORDER API CALL] Leg {leg.leg_number}, account={account_name}, symbol={symbol}, attempt={attempt + 1}/{max_retries}, calling OpenAlgo...", flush=True)
                         response = place_order_with_freeze_check(
                             client=client,
                             user_id=self.strategy.user_id,
                             **order_params
                         )
-                        print(f"[ORDER RESPONSE] Attempt {attempt + 1}: {response}")
+                        api_duration = time_module.time() - api_start
+                        print(f"[ORDER RESPONSE] Leg {leg.leg_number}, account={account_name}, attempt={attempt + 1}, duration={api_duration:.2f}s, response={response}", flush=True)
 
                         # If we got a response, break the retry loop
                         if response and isinstance(response, dict):
@@ -2071,10 +2078,8 @@ class StrategyExecutor:
     def _monitor_exit_conditions(self, execution_id: int):
         """Monitor position for exit conditions using real-time WebSocket data"""
         import time as time_module
-        from app import create_app
 
-        # Create new app context for this thread
-        app = create_app()
+        app = self.app
         with app.app_context():
             # Query execution fresh in this thread's context
             execution = StrategyExecution.query.get(execution_id)
