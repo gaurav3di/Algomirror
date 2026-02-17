@@ -2253,6 +2253,88 @@ def risk_status_stream():
                                         print(f"[RISK MONITOR] MAX PROFIT HIT! Strategy: {strategy.name}, P&L: {total_pnl}, Threshold: {strategy.max_profit}", flush=True)
                                         close_all_strategy_positions(strategy.id, 'max_profit')
 
+                        # ============================================================
+                        # TRAILING STOP LOSS (AFL-style ratcheting)
+                        # Ported from risk_manager.py:check_trailing_sl() to ensure
+                        # TSL exits work even when risk_manager's price pipeline fails
+                        # ============================================================
+                        if (strategy.trailing_sl and strategy.trailing_sl > 0
+                                and not strategy.trailing_sl_triggered_at):
+                            # Only process TSL if we have at least one position with real-time price
+                            has_realtime = any(
+                                e.get('price_source') == 'realtime' and e.get('status') == 'entered'
+                                for e in executions_data
+                            )
+                            open_entered = [e for e in open_executions if e.status == 'entered']
+
+                            if has_realtime and open_entered and abs(total_pnl) >= 0.01:
+                                trailing_type = strategy.trailing_sl_type or 'percentage'
+                                trailing_value = float(strategy.trailing_sl)
+
+                                # Calculate net premium from open executions
+                                net_premium = 0
+                                for ex in open_entered:
+                                    if ex.entry_price and ex.quantity:
+                                        premium = (ex.entry_price or 0) * (ex.quantity or 0)
+                                        leg = ex.leg
+                                        if leg and leg.action and leg.action.upper() == 'BUY':
+                                            net_premium += premium
+                                        else:
+                                            net_premium -= premium
+
+                                entry_value = abs(net_premium)
+
+                                # Calculate initial stop
+                                if trailing_type == 'percentage':
+                                    initial_stop_pnl = -entry_value * (trailing_value / 100)
+                                elif trailing_type == 'points':
+                                    initial_stop_pnl = -trailing_value
+                                else:
+                                    initial_stop_pnl = -trailing_value
+
+                                # Set initial stop if not already set
+                                if strategy.trailing_sl_initial_stop is None:
+                                    strategy.trailing_sl_initial_stop = initial_stop_pnl
+                                    print(f"[TSL SSE] {strategy.name}: Initial stop set at {initial_stop_pnl:.2f} (entry_value={entry_value:.2f})", flush=True)
+
+                                strategy.trailing_sl_active = True
+
+                                # Track peak P&L (ratchet up only)
+                                current_peak = strategy.trailing_sl_peak_pnl or 0.0
+                                if total_pnl > current_peak:
+                                    strategy.trailing_sl_peak_pnl = total_pnl
+                                    current_peak = total_pnl
+
+                                # Calculate trailing stop: Initial Stop + Peak P&L
+                                current_stop = strategy.trailing_sl_initial_stop + current_peak
+
+                                # Ratchet: stop can only move UP
+                                previous_stop = strategy.trailing_sl_trigger_pnl or strategy.trailing_sl_initial_stop
+                                current_stop = max(current_stop, previous_stop)
+
+                                strategy.trailing_sl_trigger_pnl = current_stop
+                                db.session.commit()
+
+                                # Skip near-zero P&L (likely stale price)
+                                if abs(total_pnl) < 1.0 and len(open_entered) > 0:
+                                    pass  # Don't trigger on near-zero P&L
+                                elif total_pnl <= current_stop:
+                                    # TSL TRIGGERED - close all positions
+                                    import pytz
+                                    ist = pytz.timezone('Asia/Kolkata')
+                                    now_ist = datetime.now(ist)
+
+                                    exit_reason = f"TSL: P&L {total_pnl:.2f} <= Stop {current_stop:.2f} (Peak: {current_peak:.2f}, Initial: {strategy.trailing_sl_initial_stop:.2f})"
+                                    strategy.trailing_sl_triggered_at = now_ist
+                                    strategy.trailing_sl_exit_reason = exit_reason
+                                    db.session.commit()
+
+                                    print(f"[TSL SSE TRIGGERED] {strategy.name}: P&L={total_pnl:.2f} <= Stop={current_stop:.2f} (Peak={current_peak:.2f})", flush=True)
+
+                                    still_open = any(e.status == 'entered' and not e.exit_order_id for e in open_executions)
+                                    if still_open:
+                                        close_all_strategy_positions(strategy.id, 'trailing_sl')
+
                         risk_data.append({
                             'strategy_id': strategy.id,
                             'strategy_name': strategy.name,
