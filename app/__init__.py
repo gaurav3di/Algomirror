@@ -229,6 +229,7 @@ def create_app(config_name=None):
     from app.margin import margin_bp
     from app.api import api_bp
     from app.tradingview import tradingview_bp
+    from app.equity import equity_bp
 
     app.register_blueprint(auth_bp, url_prefix='/auth')
     app.register_blueprint(main_bp)
@@ -239,6 +240,7 @@ def create_app(config_name=None):
     app.register_blueprint(margin_bp)  # url_prefix defined in blueprint
     app.register_blueprint(api_bp, url_prefix='/api')
     app.register_blueprint(tradingview_bp)  # url_prefix defined in blueprint (/tradingview)
+    app.register_blueprint(equity_bp)  # url_prefix defined in blueprint (/equity)
 
     # Diagnose blueprint — admin-only debugging UI + APIs at /diagnose
     from app.diagnose import diagnose_bp

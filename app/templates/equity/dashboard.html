@@ -1,0 +1,481 @@
+{% extends "layout.html" %}
+
+{% block title %}Equity Dashboard - AlgoMirror{% endblock %}
+
+{% block page_title %}Equity Dashboard{% endblock %}
+
+{% block content %}
+<style>
+    /* Tabular numerals for every column of aligned digits on this screen. The
+       compiled stylesheet only carries a dark-theme monospace helper, so the
+       rule is stated here so it applies in both themes. */
+    .equity-num { font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h1 class="text-3xl font-bold">Equity Dashboard</h1>
+            <p class="text-base-content/70 mt-1">
+                CNC delivery holdings and cash across all connected accounts. This screen is read-only.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
+            <button onclick="equityLoadDashboard()" class="btn btn-primary btn-sm h-9" id="equity-refresh-btn">
+                Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stale marker. Shown instead of blanking the page when a poll fails. -->
+    <div class="alert alert-warning hidden" id="equity-stale-banner">
+        <span id="equity-stale-text"></span>
+    </div>
+
+    {% if accounts %}
+    <!--
+        KPI STRIP.
+
+        Each KPI is the honest sum of the per-account card values shown below
+        it, which is the same definition the server documents in
+        _build_dashboard_payload. The approved mockup's own KPI strip does not
+        reconcile with its account cards (Total Portfolio Value 224.60L against
+        card holdings summing to 32.20L, Available Cash 105.60L against card
+        cash summing to 182.84L), so those mockup figures are treated as
+        illustrative sample data. Correct the definition here and on the server
+        together if the owner intended something else.
+    -->
+    <div class="overflow-x-auto">
+        <div class="stats shadow w-full">
+            <div class="stat">
+                <div class="stat-title">Active Accounts</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-active-accounts">--</div>
+                <div class="stat-desc" id="equity-kpi-connected-accounts">Connected: --</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Total Portfolio Value</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-portfolio-value">--</div>
+                <div class="stat-desc">Sum of holdings value</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Available Cash</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-available-cash">--</div>
+                <div class="stat-desc">Live broker balance</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Unrealised P&amp;L</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-unrealised-pnl">--</div>
+                <div class="stat-desc">Before exit costs</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Today's P&amp;L</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-todays-pnl">--</div>
+                <div class="stat-desc" id="equity-kpi-todays-pnl-note">Against previous close</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Open Orders</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-open-orders">--</div>
+                <div class="stat-desc">Pending or partial</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Account cards. Rendered by the server so the page never goes blank,
+         the poll only writes the numbers into them. -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for account in accounts %}
+        <div class="card bg-base-100 shadow-xl" id="equity-card-{{ account.id }}">
+            <div class="card-body p-4 space-y-3">
+                <div class="flex justify-between items-start gap-2">
+                    <div class="min-w-0">
+                        <h3 class="font-semibold truncate">{{ account.account_name }}</h3>
+                        <p class="text-xs text-base-content/60 truncate">{{ account.broker_name or 'Broker not detected' }}</p>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span class="w-2 h-2 rounded-full bg-gray-400 inline-block" id="equity-dot-{{ account.id }}"></span>
+                        <span class="text-xs text-base-content/60" id="equity-status-{{ account.id }}">{{ account.connection_status or 'unknown' }}</span>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <div class="text-xs text-base-content/60">Order Qty Ratio</div>
+                        <div class="font-semibold equity-num" id="equity-ratio-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Available Cash</div>
+                        <div class="font-semibold equity-num" id="equity-cash-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Holdings Value</div>
+                        <div class="font-semibold equity-num" id="equity-holdings-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Invested</div>
+                        <div class="font-semibold equity-num" id="equity-invested-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Pledged Qty</div>
+                        <div class="font-semibold equity-num" id="equity-pledged-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Unrealised P&amp;L</div>
+                        <div class="font-semibold equity-num" id="equity-unrealised-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Today's P&amp;L</div>
+                        <div class="font-semibold equity-num" id="equity-todays-{{ account.id }}">--</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-base-content/60">Holdings</div>
+                        <div class="font-semibold equity-num" id="equity-count-{{ account.id }}">--</div>
+                    </div>
+                </div>
+
+                <div class="text-xs text-warning hidden" id="equity-note-{{ account.id }}"></div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Today's Orders -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Today's Orders</h2>
+            <p class="text-sm text-base-content/60">
+                Equity orders placed today. Order placement arrives in a later increment, so this table stays empty for now.
+            </p>
+
+            <div class="overflow-x-auto">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Order ID</th>
+                            <th>Symbol</th>
+                            <th>Exchange</th>
+                            <th>Side</th>
+                            <th>Type</th>
+                            <th>Product</th>
+                            <th class="text-right">Qty</th>
+                            <th class="text-right">Filled</th>
+                            <th class="text-right">Price</th>
+                            <th class="text-right">Stop Loss</th>
+                            <th class="text-right">Target</th>
+                            <th>Status</th>
+                            <th class="text-right">Accounts</th>
+                            <th>Placed At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="equity-orders-body">
+                        <tr id="equity-orders-empty">
+                            <td colspan="14" class="text-center py-8 text-base-content/60">
+                                No orders today. Nothing on this screen can place an order in this increment.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    {% else %}
+    <!-- No accounts at all -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body text-center py-16">
+            <h2 class="text-2xl font-bold mb-2">No Active Accounts</h2>
+            <p class="text-base-content/70 max-w-md mx-auto">
+                Add and connect a trading account before using the equity module.
+            </p>
+            <div class="mt-6">
+                <a href="{{ url_for('accounts.add') }}" class="btn btn-primary">Add Account</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Equity Dashboard (M1). Read only: it polls /equity/api/dashboard and writes
+// numbers into the server rendered cards. It never posts anything.
+// ---------------------------------------------------------------------------
+
+// One shared formatting helper for the whole screen so the rounding rules
+// cannot drift between the KPI strip, the account cards and the orders table.
+const EquityFormat = {
+    LAKH: 100000,
+
+    // Compact rupees for summary figures: the lakh suffix above one lakh
+    // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
+    compact: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0'; }
+        const sign = num < 0 ? '-' : '';
+        const abs = Math.abs(num);
+        if (abs >= EquityFormat.LAKH) {
+            return sign + 'Rs ' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+        }
+        return sign + 'Rs ' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    },
+
+    // Plain Indian grouped rupees with paise, for row level figures.
+    rupees: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0.00'; }
+        const sign = num < 0 ? '-' : '';
+        return sign + 'Rs ' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    },
+
+    // Percent to one decimal place, keeping a second decimal only where it
+    // carries information: 71.0, 65.0, 2.28, 10.0, 0.97, 4.98.
+    percent: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0.0'; }
+        let text = num.toFixed(2);
+        if (text.slice(-1) === '0') { text = text.slice(0, -1); }
+        return text + '%';
+    },
+
+    // Explicit plus sign on a gain. Losses already carry their minus sign.
+    signed: function (value, style) {
+        const num = Number(value) || 0;
+        const text = style === 'compact' ? EquityFormat.compact(num) : EquityFormat.rupees(num);
+        return num > 0 ? '+' + text : text;
+    },
+
+    pnlClass: function (value) {
+        const num = Number(value) || 0;
+        if (num > 0) { return 'text-success'; }
+        if (num < 0) { return 'text-error'; }
+        return '';
+    },
+
+    integer: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0'; }
+        return Math.round(num).toLocaleString('en-IN');
+    },
+
+    clockTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    }
+};
+
+const EQUITY_POLL_MS = 30000;
+const EQUITY_FETCH_TIMEOUT_MS = 20000;
+let equityPollTimer = null;
+let equityLoading = false;
+
+function equitySetText(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) { return; }
+    el.textContent = text;
+    if (className !== undefined) {
+        el.className = className;
+    }
+}
+
+function equityShowStale(message) {
+    const banner = document.getElementById('equity-stale-banner');
+    const text = document.getElementById('equity-stale-text');
+    if (!banner || !text) { return; }
+    if (message) {
+        text.textContent = message;
+        banner.classList.remove('hidden');
+    } else {
+        banner.classList.add('hidden');
+    }
+}
+
+function equityStatusDotClass(status, isStale) {
+    if (isStale) { return 'w-2 h-2 rounded-full bg-warning inline-block'; }
+    if (status === 'connected') { return 'w-2 h-2 rounded-full bg-success inline-block'; }
+    if (status === 'disconnected') { return 'w-2 h-2 rounded-full bg-gray-400 inline-block'; }
+    return 'w-2 h-2 rounded-full bg-error inline-block';
+}
+
+function equityApplyKpi(kpi) {
+    equitySetText('equity-kpi-active-accounts', EquityFormat.integer(kpi.active_accounts));
+    equitySetText('equity-kpi-connected-accounts', 'Connected: ' + EquityFormat.integer(kpi.connected_accounts));
+    equitySetText('equity-kpi-portfolio-value', EquityFormat.compact(kpi.total_portfolio_value));
+    equitySetText('equity-kpi-available-cash', EquityFormat.compact(kpi.available_cash));
+
+    equitySetText(
+        'equity-kpi-unrealised-pnl',
+        EquityFormat.signed(kpi.unrealised_pnl, 'compact'),
+        ('stat-value text-2xl equity-num ' + EquityFormat.pnlClass(kpi.unrealised_pnl)).trim()
+    );
+
+    if (kpi.todays_pnl_available) {
+        equitySetText(
+            'equity-kpi-todays-pnl',
+            EquityFormat.signed(kpi.todays_pnl, 'compact'),
+            ('stat-value text-2xl equity-num ' + EquityFormat.pnlClass(kpi.todays_pnl)).trim()
+        );
+        equitySetText('equity-kpi-todays-pnl-note', 'Against previous close');
+    } else {
+        equitySetText('equity-kpi-todays-pnl', 'n/a', 'stat-value text-2xl equity-num');
+        equitySetText('equity-kpi-todays-pnl-note', 'No previous close reported');
+    }
+
+    equitySetText('equity-kpi-open-orders', EquityFormat.integer(kpi.open_orders));
+}
+
+function equityApplyCard(card) {
+    const id = card.account_id;
+
+    equitySetText('equity-ratio-' + id, EquityFormat.percent(card.order_qty_ratio_pct));
+    equitySetText('equity-cash-' + id, EquityFormat.compact(card.available_cash));
+    equitySetText('equity-holdings-' + id, EquityFormat.compact(card.holdings_value));
+    equitySetText('equity-invested-' + id, EquityFormat.percent(card.invested_pct));
+    equitySetText('equity-pledged-' + id, EquityFormat.integer(card.pledged_quantity));
+    equitySetText('equity-count-' + id, EquityFormat.integer(card.holdings_count));
+
+    equitySetText(
+        'equity-unrealised-' + id,
+        EquityFormat.signed(card.unrealised_pnl, 'compact'),
+        ('font-semibold equity-num ' + EquityFormat.pnlClass(card.unrealised_pnl)).trim()
+    );
+
+    if (card.todays_pnl_available) {
+        equitySetText(
+            'equity-todays-' + id,
+            EquityFormat.signed(card.todays_pnl, 'compact'),
+            ('font-semibold equity-num ' + EquityFormat.pnlClass(card.todays_pnl)).trim()
+        );
+    } else {
+        equitySetText('equity-todays-' + id, 'n/a', 'font-semibold equity-num');
+    }
+
+    const dot = document.getElementById('equity-dot-' + id);
+    if (dot) { dot.className = equityStatusDotClass(card.connection_status, card.is_stale); }
+
+    equitySetText('equity-status-' + id, card.is_stale ? 'stale' : (card.connection_status || 'unknown'));
+
+    const note = document.getElementById('equity-note-' + id);
+    if (note) {
+        if (card.is_stale) {
+            note.textContent = card.error
+                ? ('Last known values. ' + card.error)
+                : 'Last known values, the broker did not answer.';
+            note.classList.remove('hidden');
+        } else {
+            note.textContent = '';
+            note.classList.add('hidden');
+        }
+    }
+}
+
+function equityOrderCell(text, className) {
+    const td = document.createElement('td');
+    if (className) { td.className = className; }
+    td.textContent = text === null || text === undefined ? '' : String(text);
+    return td;
+}
+
+function equityApplyOrders(orders) {
+    const body = document.getElementById('equity-orders-body');
+    if (!body) { return; }
+
+    body.textContent = '';
+
+    if (!orders || orders.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 14;
+        cell.className = 'text-center py-8 text-base-content/60';
+        cell.textContent = 'No orders today. Nothing on this screen can place an order in this increment.';
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+    }
+
+    orders.forEach(function (order) {
+        const row = document.createElement('tr');
+        row.className = 'hover';
+        row.appendChild(equityOrderCell(order.order_id, 'equity-num'));
+        row.appendChild(equityOrderCell(order.symbol, 'font-semibold'));
+        row.appendChild(equityOrderCell(order.exchange));
+        row.appendChild(equityOrderCell(order.side));
+        row.appendChild(equityOrderCell(order.order_type));
+        row.appendChild(equityOrderCell(order.product));
+        row.appendChild(equityOrderCell(EquityFormat.integer(order.total_quantity), 'text-right equity-num'));
+        row.appendChild(equityOrderCell(EquityFormat.integer(order.filled_quantity), 'text-right equity-num'));
+        row.appendChild(equityOrderCell(EquityFormat.rupees(order.price), 'text-right equity-num'));
+        row.appendChild(equityOrderCell(
+            order.stop_loss === null || order.stop_loss === undefined ? '-' : EquityFormat.rupees(order.stop_loss),
+            'text-right equity-num'
+        ));
+        row.appendChild(equityOrderCell(
+            order.target === null || order.target === undefined ? '-' : EquityFormat.rupees(order.target),
+            'text-right equity-num'
+        ));
+        row.appendChild(equityOrderCell(order.status));
+        row.appendChild(equityOrderCell(EquityFormat.integer(order.accounts_count), 'text-right equity-num'));
+        row.appendChild(equityOrderCell(EquityFormat.clockTime(order.placed_at), 'equity-num'));
+        body.appendChild(row);
+    });
+}
+
+async function equityLoadDashboard() {
+    if (equityLoading) { return; }
+    equityLoading = true;
+
+    const button = document.getElementById('equity-refresh-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetch('/equity/api/dashboard?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowStale('Live data unavailable, showing the last values loaded. ' + (data.message || ''));
+            return;
+        }
+
+        equityApplyKpi(data.kpi || {});
+        (data.accounts || []).forEach(equityApplyCard);
+        equityApplyOrders(data.todays_orders);
+
+        const staleIds = data.stale_account_ids || [];
+        if (staleIds.length > 0) {
+            equityShowStale(
+                staleIds.length + ' account(s) did not answer. Those cards show the last known values.'
+            );
+        } else {
+            equityShowStale('');
+        }
+
+        equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(data.generated_at));
+    } catch (error) {
+        // Degrade to a visible stale marker, never blank the page.
+        equityShowStale('Live data unavailable, showing the last values loaded. Retrying shortly.');
+        console.error('Equity dashboard load failed:', error);
+    } finally {
+        equityLoading = false;
+        if (button) { button.disabled = false; }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    {% if accounts %}
+    equityLoadDashboard();
+    equityPollTimer = setInterval(equityLoadDashboard, EQUITY_POLL_MS);
+    {% endif %}
+});
+
+window.addEventListener('beforeunload', function () {
+    if (equityPollTimer) {
+        clearInterval(equityPollTimer);
+        equityPollTimer = null;
+    }
+});
+</script>
+{% endblock %}

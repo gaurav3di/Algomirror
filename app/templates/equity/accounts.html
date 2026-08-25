@@ -1,0 +1,456 @@
+{% extends "layout.html" %}
+
+{% block title %}Equity Allocation - AlgoMirror{% endblock %}
+
+{% block page_title %}Equity Accounts{% endblock %}
+
+{% block content %}
+<style>
+    /* Tabular numerals for every column of aligned digits on this screen. The
+       compiled stylesheet only carries a dark-theme monospace helper, so the
+       rule is stated here so it applies in both themes. */
+    .equity-num { font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h1 class="text-3xl font-bold">Equity Allocation</h1>
+            <p class="text-base-content/70 mt-1">
+                Set the investable equity corpus per account. Available Cash is read-only and comes from the broker.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
+            <button onclick="equityLoadAccounts()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">Refresh</button>
+            {% if accounts %}
+            <button onclick="equitySaveAllocation()" class="btn btn-primary btn-sm h-9" id="equity-save-btn">
+                Save Equity Allocation
+            </button>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Stale marker. Shown instead of blanking the page when a poll fails. -->
+    <div class="alert alert-warning hidden" id="equity-stale-banner">
+        <span id="equity-stale-text"></span>
+    </div>
+
+    <!-- Save result -->
+    <div class="alert hidden" id="equity-save-banner">
+        <span id="equity-save-text"></span>
+    </div>
+
+    {% if accounts %}
+    <!-- One card per account -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for account in accounts %}
+        <div class="card bg-base-100 shadow-xl" id="equity-card-{{ account.id }}">
+            <div class="card-body p-4 space-y-3">
+                <div class="flex justify-between items-start gap-2">
+                    <div class="min-w-0">
+                        <h3 class="font-semibold truncate">{{ account.account_name }}</h3>
+                        <p class="text-xs text-base-content/60 truncate">{{ account.broker_name or 'Broker not detected' }}</p>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span class="w-2 h-2 rounded-full bg-gray-400 inline-block" id="equity-dot-{{ account.id }}"></span>
+                        <span class="text-xs text-base-content/60" id="equity-status-{{ account.id }}">{{ account.connection_status or 'unknown' }}</span>
+                    </div>
+                </div>
+
+                <div>
+                    <div class="text-xs text-base-content/60">Available Cash (read-only, live from broker)</div>
+                    <div class="font-semibold equity-num" id="equity-cash-{{ account.id }}">--</div>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-allocation-{{ account.id }}">
+                        <span class="label-text">Equity Fund Allocation (Rs)</span>
+                    </label>
+                    <input type="number"
+                           id="equity-allocation-{{ account.id }}"
+                           class="input input-bordered input-sm equity-num"
+                           data-account-id="{{ account.id }}"
+                           min="0"
+                           step="1"
+                           value="0"
+                           oninput="equityMarkDirty(); equityRecomputeRatios();">
+                    <label class="label">
+                        <span class="label-text-alt text-base-content/60" id="equity-allocation-hint-{{ account.id }}">--</span>
+                    </label>
+                </div>
+
+                <div class="flex justify-between items-center">
+                    <span class="text-xs text-base-content/60">Order Qty Ratio (auto computed)</span>
+                    <span class="font-semibold equity-num" id="equity-ratio-{{ account.id }}">--</span>
+                </div>
+
+                <div class="text-xs text-warning hidden" id="equity-note-{{ account.id }}"></div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Footer totals -->
+    <div class="card bg-base-200 shadow">
+        <div class="card-body p-4">
+            <div class="flex justify-between items-center flex-wrap gap-4">
+                <div>
+                    <div class="text-xs text-base-content/60">Total Equity Fund Allocation</div>
+                    <div class="text-xl font-bold equity-num" id="equity-total-allocation">--</div>
+                </div>
+                <div>
+                    <div class="text-xs text-base-content/60">Order Qty Ratio Total</div>
+                    <div class="text-xl font-bold equity-num" id="equity-total-ratio">--</div>
+                    <div class="text-xs text-base-content/60" id="equity-total-ratio-note">Expected to read 100.0%</div>
+                </div>
+                <div>
+                    <div class="text-xs text-base-content/60">Active Accounts</div>
+                    <div class="text-xl font-bold equity-num" id="equity-total-accounts">--</div>
+                </div>
+                <div>
+                    <div class="text-xs text-base-content/60">Total Available Cash</div>
+                    <div class="text-xl font-bold equity-num" id="equity-total-cash">--</div>
+                    <div class="text-xs text-base-content/60">Not used in any allocation formula</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rules panel. Copy is served by the route so the screen and the
+         behaviour implemented on the server cannot drift apart. -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Rules</h2>
+            <ul class="list-disc list-inside space-y-2 text-sm text-base-content/70">
+                {% for rule in allocation_rules %}
+                <li>{{ rule }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    {% else %}
+    <!-- No accounts at all -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body text-center py-16">
+            <h2 class="text-2xl font-bold mb-2">No Active Accounts</h2>
+            <p class="text-base-content/70 max-w-md mx-auto">
+                Add and connect a trading account before setting an equity allocation.
+            </p>
+            <div class="mt-6">
+                <a href="{{ url_for('accounts.add') }}" class="btn btn-primary">Add Account</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Equity Accounts (M2). Read only against the broker: the only write is the
+// rupee allocation, which goes to AlgoMirror's own database.
+// ---------------------------------------------------------------------------
+
+// One shared formatting helper for the whole screen so the rounding rules
+// cannot drift between the cards and the totals footer.
+const EquityFormat = {
+    LAKH: 100000,
+
+    // Compact rupees for summary figures: the lakh suffix above one lakh
+    // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
+    compact: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0'; }
+        const sign = num < 0 ? '-' : '';
+        const abs = Math.abs(num);
+        if (abs >= EquityFormat.LAKH) {
+            return sign + 'Rs ' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+        }
+        return sign + 'Rs ' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    },
+
+    // Percent to one decimal place, keeping a second decimal only where it
+    // carries information: 40.0, 20.0, 10.0, 2.28.
+    percent: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0.0'; }
+        let text = num.toFixed(2);
+        if (text.slice(-1) === '0') { text = text.slice(0, -1); }
+        return text + '%';
+    },
+
+    integer: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0'; }
+        return Math.round(num).toLocaleString('en-IN');
+    },
+
+    clockTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    }
+};
+
+const EQUITY_POLL_MS = 30000;
+const EQUITY_FETCH_TIMEOUT_MS = 20000;
+let equityPollTimer = null;
+let equityLoading = false;
+
+// Set once the admin edits an allocation box. A background poll must never
+// overwrite a figure the admin is still typing.
+let equityAllocationDirty = false;
+
+function equityMarkDirty() {
+    equityAllocationDirty = true;
+}
+
+function equitySetText(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) { return; }
+    el.textContent = text;
+    if (className !== undefined) {
+        el.className = className;
+    }
+}
+
+function equityShowStale(message) {
+    const banner = document.getElementById('equity-stale-banner');
+    const text = document.getElementById('equity-stale-text');
+    if (!banner || !text) { return; }
+    if (message) {
+        text.textContent = message;
+        banner.classList.remove('hidden');
+    } else {
+        banner.classList.add('hidden');
+    }
+}
+
+function equityShowSaveResult(message, kind) {
+    const banner = document.getElementById('equity-save-banner');
+    const text = document.getElementById('equity-save-text');
+    if (!banner || !text) { return; }
+    if (!message) {
+        banner.classList.add('hidden');
+        return;
+    }
+    text.textContent = message;
+    banner.className = 'alert ' + (kind === 'error' ? 'alert-error' : 'alert-success');
+}
+
+function equityStatusDotClass(status, isStale) {
+    if (isStale) { return 'w-2 h-2 rounded-full bg-warning inline-block'; }
+    if (status === 'connected') { return 'w-2 h-2 rounded-full bg-success inline-block'; }
+    if (status === 'disconnected') { return 'w-2 h-2 rounded-full bg-gray-400 inline-block'; }
+    return 'w-2 h-2 rounded-full bg-error inline-block';
+}
+
+function equityAllocationInputs() {
+    return Array.prototype.slice.call(document.querySelectorAll('input[data-account-id]'));
+}
+
+// Browser side preview of the Order Qty Ratio. This mirrors
+// compute_order_qty_ratios in app/utils/equity_ratio.py: an account's ratio is
+// its allocation divided by the total allocation of all active accounts, and a
+// zero total yields zero for every account rather than a division by zero. The
+// server stays authoritative, its response overwrites these figures on save.
+function equityRecomputeRatios() {
+    const inputs = equityAllocationInputs();
+    let total = 0;
+    inputs.forEach(function (input) {
+        const value = parseFloat(input.value);
+        total += isFinite(value) && value > 0 ? value : 0;
+    });
+
+    let ratioTotal = 0;
+    inputs.forEach(function (input) {
+        const id = input.getAttribute('data-account-id');
+        const raw = parseFloat(input.value);
+        const value = isFinite(raw) && raw > 0 ? raw : 0;
+        const ratio = total > 0 ? (value / total) * 100 : 0;
+        ratioTotal += ratio;
+        equitySetText('equity-ratio-' + id, EquityFormat.percent(ratio));
+        equitySetText('equity-allocation-hint-' + id, EquityFormat.compact(value));
+    });
+
+    equitySetText('equity-total-allocation', EquityFormat.compact(total));
+    equitySetText('equity-total-ratio', EquityFormat.percent(total > 0 ? ratioTotal : 0));
+    equitySetText(
+        'equity-total-ratio-note',
+        total > 0 ? 'Expected to read 100.0%' : 'No allocation set, every ratio is zero'
+    );
+}
+
+function equityApplyAccounts(payload) {
+    const liveCash = payload.live_cash === true;
+    const entries = payload.accounts || [];
+
+    entries.forEach(function (entry) {
+        const id = entry.account_id;
+
+        if (!equityAllocationDirty) {
+            const input = document.getElementById('equity-allocation-' + id);
+            if (input && document.activeElement !== input) {
+                input.value = entry.equity_fund_allocation;
+            }
+        }
+
+        equitySetText('equity-ratio-' + id, EquityFormat.percent(entry.order_qty_ratio_pct));
+
+        if (liveCash) {
+            equitySetText('equity-cash-' + id, EquityFormat.compact(entry.available_cash));
+        }
+
+        const dot = document.getElementById('equity-dot-' + id);
+        if (dot) { dot.className = equityStatusDotClass(entry.connection_status, liveCash && entry.is_stale); }
+
+        if (liveCash) {
+            equitySetText('equity-status-' + id, entry.is_stale ? 'stale' : (entry.connection_status || 'unknown'));
+        }
+
+        const note = document.getElementById('equity-note-' + id);
+        if (note) {
+            if (liveCash && entry.is_stale) {
+                note.textContent = entry.error
+                    ? ('Cash shown is the last known value. ' + entry.error)
+                    : 'Cash shown is the last known value, the broker did not answer.';
+                note.classList.remove('hidden');
+            } else if (liveCash) {
+                note.textContent = '';
+                note.classList.add('hidden');
+            }
+        }
+    });
+
+    const totals = payload.totals || {};
+    equitySetText('equity-total-allocation', EquityFormat.compact(totals.total_equity_fund_allocation));
+    equitySetText('equity-total-ratio', EquityFormat.percent(totals.order_qty_ratio_pct_total));
+    equitySetText('equity-total-accounts', EquityFormat.integer(totals.active_accounts));
+    if (liveCash) {
+        equitySetText('equity-total-cash', EquityFormat.compact(totals.total_available_cash));
+    }
+
+    // Recompute from the boxes so the preview and the saved figures agree.
+    if (!equityAllocationDirty) {
+        equityRecomputeRatios();
+    }
+
+    equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(payload.generated_at));
+}
+
+async function equityLoadAccounts() {
+    if (equityLoading) { return; }
+    equityLoading = true;
+
+    const button = document.getElementById('equity-refresh-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetch('/equity/api/accounts?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowStale('Live data unavailable, showing the last values loaded. ' + (data.message || ''));
+            return;
+        }
+
+        equityApplyAccounts(data);
+
+        // This endpoint reports staleness per account rather than as a list,
+        // so the banner counts the entries that came back stale.
+        const staleCount = (data.accounts || []).filter(function (entry) {
+            return entry.is_stale === true;
+        }).length;
+        if (staleCount > 0) {
+            equityShowStale(staleCount + ' account(s) did not answer. Their cash is the last known value.');
+        } else {
+            equityShowStale('');
+        }
+    } catch (error) {
+        // Degrade to a visible stale marker, never blank the page.
+        equityShowStale('Live data unavailable, showing the last values loaded. Retrying shortly.');
+        console.error('Equity accounts load failed:', error);
+    } finally {
+        equityLoading = false;
+        if (button) { button.disabled = false; }
+    }
+}
+
+async function equitySaveAllocation() {
+    const button = document.getElementById('equity-save-btn');
+    const allocations = [];
+    let invalid = null;
+
+    equityAllocationInputs().forEach(function (input) {
+        const id = parseInt(input.getAttribute('data-account-id'), 10);
+        const value = parseFloat(input.value);
+        if (!isFinite(value) || value < 0) {
+            invalid = input;
+            return;
+        }
+        allocations.push({ account_id: id, equity_fund_allocation: value });
+    });
+
+    if (invalid) {
+        equityShowSaveResult('Every allocation must be zero or a positive rupee amount.', 'error');
+        invalid.focus();
+        return;
+    }
+
+    if (allocations.length === 0) {
+        equityShowSaveResult('There is nothing to save.', 'error');
+        return;
+    }
+
+    if (button) { button.disabled = true; }
+    equityShowSaveResult('');
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/accounts/allocation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ allocations: allocations }),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowSaveResult(data.message || 'Failed to save the equity allocation.', 'error');
+            return;
+        }
+
+        // The save skips the broker call, so live_cash is false and the cash
+        // figures come back null. Only the allocation and the ratio are
+        // refreshed from it, the cash already on screen is kept.
+        equityAllocationDirty = false;
+        equityApplyAccounts(data);
+        equityShowSaveResult(data.message || 'Equity allocation saved.', 'success');
+    } catch (error) {
+        equityShowSaveResult('Failed to save the equity allocation. Check the connection and try again.', 'error');
+        console.error('Equity allocation save failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    {% if accounts %}
+    equityLoadAccounts();
+    equityPollTimer = setInterval(equityLoadAccounts, EQUITY_POLL_MS);
+    {% endif %}
+});
+
+window.addEventListener('beforeunload', function () {
+    if (equityPollTimer) {
+        clearInterval(equityPollTimer);
+        equityPollTimer = null;
+    }
+});
+</script>
+{% endblock %}

@@ -918,3 +918,397 @@ class RiskEvent(db.Model):
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
+
+# ---------------------------------------------------------------------------
+# Equity Trading Module
+#
+# Product code note: OpenAlgo uses CNC for equity delivery and NRML for F&O
+# carry forward. The equity module is delivery only, so every equity order and
+# every cost calculation uses CNC. Import EQUITY_PRODUCT_CNC instead of writing
+# the literal string anywhere else.
+# ---------------------------------------------------------------------------
+
+EQUITY_PRODUCT_CNC = 'CNC'
+
+# Order side values
+EQUITY_SIDE_BUY = 'BUY'
+EQUITY_SIDE_SELL = 'SELL'
+
+# Parent order type values
+EQUITY_ORDER_TYPE_MARKET = 'MARKET'
+EQUITY_ORDER_TYPE_LIMIT = 'LIMIT'
+EQUITY_ORDER_TYPE_GTT = 'GTT'
+
+# Parent order status values
+EQUITY_ORDER_STATUS_PENDING = 'PENDING'
+EQUITY_ORDER_STATUS_PARTIAL = 'PARTIAL'
+EQUITY_ORDER_STATUS_COMPLETED = 'COMPLETED'
+EQUITY_ORDER_STATUS_CANCELLED = 'CANCELLED'
+
+# Holding exit mode values
+EQUITY_EXIT_MODE_AUTO = 'AUTO'
+EQUITY_EXIT_MODE_CONFIRM = 'CONFIRM'
+
+
+class EquityAccountAllocation(db.Model):
+    """
+    Equity fund allocation for one trading account.
+
+    This is deliberately a separate one-row-per-account table instead of extra
+    columns on TradingAccount. TradingAccount is shared with the live F&O
+    module, so altering it risks that module. The equity module owns no columns
+    on trading_accounts and relates back to it by id.
+
+    The equity module does still refresh the broker payload cache that already
+    exists on the shared row (last_funds_data, last_holdings_data and
+    last_data_update), the same way the trading, accounts and margin blueprints
+    do. See _refresh_account_cache in app/equity/routes.py for the rule that
+    stops a holdings-only read from making stale F&O cash look fresh.
+    """
+    __tablename__ = 'equity_account_allocations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('trading_accounts.id'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+
+    # Rupee amount of this account's funds earmarked for equity trading
+    equity_fund_allocation = db.Column(db.Float, nullable=False, default=0.0)
+
+    is_active = db.Column(db.Boolean, default=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    account = db.relationship('TradingAccount', backref=db.backref('equity_allocation', uselist=False))
+    user = db.relationship('User', backref='equity_allocations')
+
+    # One allocation row per trading account
+    __table_args__ = (
+        db.UniqueConstraint('account_id', name='_equity_allocation_account_uc'),
+        db.Index('ix_equity_account_allocations_user_active', 'user_id', 'is_active'),
+    )
+
+    def __repr__(self):
+        return f'<EquityAccountAllocation Account {self.account_id} - Rs {self.equity_fund_allocation}>'
+
+
+class EquityTradeNature(db.Model):
+    """
+    Admin configurable tag describing why a trade is being taken,
+    for example Swing or Long Term. Shared across all accounts.
+    """
+    __tablename__ = 'equity_trade_natures'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    name = db.Column(db.String(50), nullable=False, index=True)
+    display_order = db.Column(db.Integer, default=0, index=True)
+    is_active = db.Column(db.Boolean, default=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship
+    user = db.relationship('User', backref='equity_trade_natures')
+
+    # Unique constraint for user and nature name
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'name', name='_user_trade_nature_uc'),
+    )
+
+    def __repr__(self):
+        return f'<EquityTradeNature {self.name}>'
+
+    @staticmethod
+    def get_or_create_defaults(user_id):
+        """Create the default trade natures for a user if they do not exist"""
+        defaults = [
+            {'name': 'Swing', 'display_order': 1},
+            {'name': 'Short Term', 'display_order': 2},
+            {'name': 'Long Term', 'display_order': 3},
+            {'name': 'Momentum', 'display_order': 4},
+        ]
+
+        for default in defaults:
+            nature = EquityTradeNature.query.filter_by(
+                user_id=user_id,
+                name=default['name']
+            ).first()
+
+            if not nature:
+                nature = EquityTradeNature(
+                    user_id=user_id,
+                    name=default['name'],
+                    display_order=default['display_order']
+                )
+                db.session.add(nature)
+
+        db.session.commit()
+
+
+class EquityWatchlistItem(db.Model):
+    """
+    Watch list entry. The watch list is shared at the admin level and is not
+    scoped to a single trading account.
+    """
+    __tablename__ = 'equity_watchlist_items'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    symbol = db.Column(db.String(50), nullable=False, index=True)
+    exchange = db.Column(db.String(20), nullable=False, default='NSE', index=True)
+    trade_nature_id = db.Column(db.Integer, db.ForeignKey('equity_trade_natures.id'), nullable=True, index=True)
+
+    target_price = db.Column(db.Float)
+    alert_price = db.Column(db.Float)
+    price_alert_enabled = db.Column(db.Boolean, default=False, index=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref='equity_watchlist_items')
+    trade_nature = db.relationship('EquityTradeNature', backref='watchlist_items')
+
+    # Unique constraint for user, symbol, and exchange
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'symbol', 'exchange', name='_user_watchlist_symbol_uc'),
+    )
+
+    def __repr__(self):
+        return f'<EquityWatchlistItem {self.symbol} - {self.exchange}>'
+
+
+class EquityOrder(db.Model):
+    """
+    Parent multi-account equity order. One row per admin action, split into
+    one EquityOrderSplit per participating trading account.
+    """
+    __tablename__ = 'equity_orders'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+
+    symbol = db.Column(db.String(50), nullable=False, index=True)
+    exchange = db.Column(db.String(20), nullable=False, default='NSE', index=True)
+    side = db.Column(db.String(10), nullable=False)  # 'BUY', 'SELL'
+    order_type = db.Column(db.String(20), nullable=False, default=EQUITY_ORDER_TYPE_MARKET)  # 'MARKET', 'LIMIT', 'GTT'
+    product = db.Column(db.String(10), nullable=False, default=EQUITY_PRODUCT_CNC)  # Always CNC (delivery)
+
+    total_quantity = db.Column(db.Integer, nullable=False, default=0)
+    price = db.Column(db.Float)  # Limit or GTT trigger price, NULL for MARKET
+    stop_loss = db.Column(db.Float)
+    target = db.Column(db.Float)
+
+    status = db.Column(db.String(20), nullable=False, default=EQUITY_ORDER_STATUS_PENDING, index=True)
+    placed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref='equity_orders')
+    splits = db.relationship('EquityOrderSplit', backref='equity_order', lazy='dynamic', cascade='all, delete-orphan')
+
+    __table_args__ = (
+        db.Index('ix_equity_orders_user_status', 'user_id', 'status'),
+        db.Index('ix_equity_orders_user_placed_at', 'user_id', 'placed_at'),
+    )
+
+    def __repr__(self):
+        return f'<EquityOrder {self.side} {self.symbol} Qty: {self.total_quantity} - {self.status}>'
+
+
+class EquityOrderSplit(db.Model):
+    """
+    One account's share of a parent equity order.
+
+    Every figure on this row is a point-in-time snapshot taken when the parent
+    order was created, so the order book always shows what was true at order
+    time. Never recalculate these values later.
+    """
+    __tablename__ = 'equity_order_splits'
+
+    id = db.Column(db.Integer, primary_key=True)
+    equity_order_id = db.Column(db.Integer, db.ForeignKey('equity_orders.id'), nullable=False, index=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('trading_accounts.id'), nullable=False, index=True)
+
+    # Snapshot values captured at order time
+    qty_ratio_at_order = db.Column(db.Float)  # This account's share of the total quantity
+    quantity = db.Column(db.Integer, nullable=False, default=0)
+    est_value = db.Column(db.Float)  # Estimated rupee value at order time
+    cash_balance_at_order = db.Column(db.Float)
+
+    # Broker response and fill tracking
+    broker_order_id = db.Column(db.String(100), index=True)
+    fill_status = db.Column(db.String(20), nullable=False, default=EQUITY_ORDER_STATUS_PENDING, index=True)
+    filled_quantity = db.Column(db.Integer, default=0)
+    avg_fill_price = db.Column(db.Float)
+    error_message = db.Column(db.Text)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    account = db.relationship('TradingAccount', backref='equity_order_splits')
+    trades = db.relationship('EquityTrade', backref='split', lazy='dynamic', cascade='all, delete-orphan')
+
+    # One split per account within a parent order
+    __table_args__ = (
+        db.UniqueConstraint('equity_order_id', 'account_id', name='_equity_order_account_uc'),
+        db.Index('ix_equity_order_splits_account_status', 'account_id', 'fill_status'),
+    )
+
+    def __repr__(self):
+        return f'<EquityOrderSplit Order {self.equity_order_id} Account {self.account_id} - {self.fill_status}>'
+
+
+class EquityTrade(db.Model):
+    """
+    A single fill against an order split. One split can produce several trades
+    when the broker fills it in parts.
+    """
+    __tablename__ = 'equity_trades'
+
+    id = db.Column(db.Integer, primary_key=True)
+    split_id = db.Column(db.Integer, db.ForeignKey('equity_order_splits.id'), nullable=False, index=True)
+
+    execution_price = db.Column(db.Float)
+    executed_quantity = db.Column(db.Integer)
+    exchange = db.Column(db.String(20), index=True)
+    executed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    broker_trade_id = db.Column(db.String(100), index=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<EquityTrade Split {self.split_id} Qty: {self.executed_quantity} @ {self.execution_price}>'
+
+
+class EquityHolding(db.Model):
+    """
+    Equity delivery holding for one account and symbol, with the AlgoMirror
+    side of the position (trade nature, stop loss, target, exit mode) that the
+    broker does not store.
+    """
+    __tablename__ = 'equity_holdings'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('trading_accounts.id'), nullable=False, index=True)
+
+    symbol = db.Column(db.String(50), nullable=False, index=True)
+    exchange = db.Column(db.String(20), nullable=False, default='NSE', index=True)
+    quantity = db.Column(db.Integer, nullable=False, default=0)
+    avg_cost = db.Column(db.Float)
+
+    trade_nature_id = db.Column(db.Integer, db.ForeignKey('equity_trade_natures.id'), nullable=True, index=True)
+    stop_loss = db.Column(db.Float)
+    target = db.Column(db.Float)
+    exit_mode = db.Column(db.String(10), nullable=False, default=EQUITY_EXIT_MODE_CONFIRM)  # 'AUTO', 'CONFIRM'
+
+    pledged_quantity = db.Column(db.Integer, default=0)
+    last_price = db.Column(db.Float)
+    last_price_updated = db.Column(db.DateTime)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref='equity_holdings')
+    account = db.relationship('TradingAccount', backref='equity_holdings')
+    trade_nature = db.relationship('EquityTradeNature', backref='holdings')
+
+    # Unique constraint for account, symbol, and exchange
+    __table_args__ = (
+        db.UniqueConstraint('account_id', 'symbol', 'exchange', name='_equity_account_holding_uc'),
+        db.Index('ix_equity_holdings_user_symbol', 'user_id', 'symbol'),
+    )
+
+    def __repr__(self):
+        return f'<EquityHolding {self.symbol} Account {self.account_id} - Qty: {self.quantity}>'
+
+
+class EquityBrokerageRate(db.Model):
+    """
+    Brokerage and statutory charge rates for one account, versioned by
+    effective date.
+
+    Cost changes must apply to future trades only, so a rate change is stored
+    as a new row with a later effective_from. Historical rows are never edited
+    in place, which keeps past cost calculations reproducible. Use
+    get_effective_rate() to resolve the row that applies on a given date.
+    """
+    __tablename__ = 'equity_brokerage_rates'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('trading_accounts.id'), nullable=False, index=True)
+    broker_name = db.Column(db.String(100), nullable=False, index=True)
+
+    # Flat rupee charge per executed order
+    brokerage_per_order = db.Column(db.Float, nullable=False, default=0.0)
+
+    # Percentage charges, stored as percent values (0.1 means 0.1 percent)
+    stt_pct = db.Column(db.Float, nullable=False, default=0.0)
+    exchange_txn_pct = db.Column(db.Float, nullable=False, default=0.0)
+    sebi_pct = db.Column(db.Float, nullable=False, default=0.0)
+    stamp_duty_pct = db.Column(db.Float, nullable=False, default=0.0)
+    gst_pct = db.Column(db.Float, nullable=False, default=0.0)
+
+    # Flat rupee charge applied per delivery sell (DP) or annually (AMC)
+    dp_amc_charge = db.Column(db.Float, nullable=False, default=0.0)
+
+    effective_from = db.Column(db.Date, nullable=False, index=True)
+    is_active = db.Column(db.Boolean, default=True, index=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref='equity_brokerage_rates')
+    account = db.relationship('TradingAccount', backref='equity_brokerage_rates')
+
+    # One rate version per account per effective date
+    __table_args__ = (
+        db.UniqueConstraint('account_id', 'effective_from', name='_equity_account_rate_effective_uc'),
+        db.Index('ix_equity_brokerage_rates_account_effective', 'account_id', 'effective_from'),
+    )
+
+    def __repr__(self):
+        return f'<EquityBrokerageRate Account {self.account_id} from {self.effective_from}>'
+
+    @staticmethod
+    def get_effective_rate(user_id, account_id, on_date=None):
+        """
+        Resolve the rate row that applies to an account on a given date.
+
+        Picks the active row with the latest effective_from that is not after
+        on_date. Returns None when no row applies, for example when rates have
+        not been configured yet or every row starts in the future. Callers
+        decide how to handle a missing rate, this never raises.
+
+        Args:
+            user_id: Owner of the account, always scoped for ownership checks
+            account_id: Trading account the rate belongs to
+            on_date: datetime.date to resolve for, defaults to today
+
+        Returns:
+            EquityBrokerageRate or None
+        """
+        from datetime import date
+
+        if on_date is None:
+            on_date = date.today()
+        elif isinstance(on_date, datetime):
+            on_date = on_date.date()
+
+        return EquityBrokerageRate.query.filter(
+            EquityBrokerageRate.user_id == user_id,
+            EquityBrokerageRate.account_id == account_id,
+            EquityBrokerageRate.is_active == True,
+            EquityBrokerageRate.effective_from <= on_date
+        ).order_by(
+            EquityBrokerageRate.effective_from.desc(),
+            EquityBrokerageRate.id.desc()
+        ).first()

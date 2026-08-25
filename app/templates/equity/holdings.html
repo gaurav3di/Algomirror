@@ -1,0 +1,570 @@
+{% extends "layout.html" %}
+
+{% block title %}Equity Holdings - AlgoMirror{% endblock %}
+
+{% block page_title %}Equity Holdings{% endblock %}
+
+{% block content %}
+<style>
+    /* Tabular numerals for every column of aligned digits on this screen. The
+       compiled stylesheet only carries a dark-theme monospace helper, so the
+       rule is stated here so it applies in both themes. */
+    .equity-num { font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h1 class="text-3xl font-bold">Holdings</h1>
+            <p class="text-base-content/70 mt-1">
+                CNC delivery holdings with stake, estimated exit costs and net P&amp;L. This screen is read-only.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
+            {% if accounts %}
+            <button onclick="equityLoadHoldings()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">Refresh</button>
+            <!-- The export is a pure read, so it is a plain link. Its query
+                 string is kept in step with the filters by the script below. -->
+            <a href="{{ url_for('equity.api_holdings_export') }}"
+               class="btn btn-success btn-sm h-9"
+               id="equity-export-link">Export CSV</a>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if accounts %}
+    <!-- Filters -->
+    <div class="card bg-base-100 shadow">
+        <div class="card-body p-4">
+            <div class="flex items-center flex-wrap gap-4">
+                <div class="form-control">
+                    <label class="label" for="equity-filter-account">
+                        <span class="label-text">Account</span>
+                    </label>
+                    <select id="equity-filter-account" class="select select-bordered select-sm" onchange="equityFiltersChanged()">
+                        <option value="all" selected>All Accounts</option>
+                        {% for account in accounts %}
+                        <option value="{{ account.id }}">{{ account.account_name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-nature">
+                        <span class="label-text">Trade Nature</span>
+                    </label>
+                    <select id="equity-filter-nature" class="select select-bordered select-sm" onchange="equityFiltersChanged()">
+                        <option value="all" selected>All</option>
+                        {% for nature in trade_natures %}
+                        <option value="{{ nature.id }}">{{ nature.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="text-xs text-base-content/60 self-start pt-3" id="equity-stake-note">
+                    Stake percent is measured against the total equity fund allocation.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stale marker. Shown instead of blanking the page when a poll fails. -->
+    <div class="alert alert-warning hidden" id="equity-stale-banner">
+        <span id="equity-stale-text"></span>
+    </div>
+
+    <!-- Accounts with no saved brokerage rates, whose Est. Costs is zero. -->
+    <div class="alert alert-info hidden" id="equity-rates-banner">
+        <span id="equity-rates-text"></span>
+    </div>
+
+    <!-- KPI cards -->
+    <div class="overflow-x-auto">
+        <div class="stats shadow w-full">
+            <div class="stat">
+                <div class="stat-title">Total Holdings</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-total-holdings">--</div>
+                <div class="stat-desc">Symbols in view</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Total Investment</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-total-investment">--</div>
+                <div class="stat-desc">At average cost</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Current Value</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-current-value">--</div>
+                <div class="stat-desc">At last traded price</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Net P&amp;L</div>
+                <div class="stat-value text-2xl equity-num" id="equity-kpi-net-pnl">--</div>
+                <div class="stat-desc" id="equity-kpi-net-pnl-note">After estimated exit costs</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Holdings table -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Holdings</h2>
+
+            <div class="overflow-x-auto">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th class="text-right">Total Qty</th>
+                            <th class="text-right">Stake</th>
+                            <th class="text-right">Avg Cost</th>
+                            <th class="text-right">LTP</th>
+                            <th class="text-right">P&amp;L %</th>
+                            <th>Stop Loss <span class="text-xs font-medium text-base-content/50">(editing coming soon)</span></th>
+                            <th>Target <span class="text-xs font-medium text-base-content/50">(editing coming soon)</span></th>
+                            <th class="text-right">Pledged</th>
+                            <th class="text-right">Gross P&amp;L</th>
+                            <th class="text-right">Est. Costs</th>
+                            <th class="text-right">Net P&amp;L</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="equity-holdings-body">
+                        <tr>
+                            <td colspan="13" class="text-center py-8 text-base-content/60">
+                                Loading holdings.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p class="text-xs text-base-content/60 mt-4">
+                Est. Costs is the cost of exiting the position: side SELL, one order and one scrip per contributing
+                account, priced at the current LTP. Net P&amp;L is Gross P&amp;L minus Est. Costs.
+            </p>
+            <p class="text-xs text-base-content/60">
+                Stop loss and target editing arrives in a later increment, so those boxes are disabled. There are no
+                Buy or Sell actions here: nothing on this screen can place, modify or cancel a broker order.
+            </p>
+        </div>
+    </div>
+
+    {% else %}
+    <!-- No accounts at all -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body text-center py-16">
+            <h2 class="text-2xl font-bold mb-2">No Active Accounts</h2>
+            <p class="text-base-content/70 max-w-md mx-auto">
+                Add and connect a trading account before viewing equity holdings.
+            </p>
+            <div class="mt-6">
+                <a href="{{ url_for('accounts.add') }}" class="btn btn-primary">Add Account</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Equity Holdings (M7). Read only: it polls /equity/api/holdings and renders
+// the rows. Nothing here can place, modify or cancel a broker order.
+// ---------------------------------------------------------------------------
+
+// One shared formatting helper for the whole screen so the rounding rules
+// cannot drift between the KPI cards and the table.
+const EquityFormat = {
+    LAKH: 100000,
+
+    // Compact rupees for summary figures: the lakh suffix above one lakh
+    // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
+    compact: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0'; }
+        const sign = num < 0 ? '-' : '';
+        const abs = Math.abs(num);
+        if (abs >= EquityFormat.LAKH) {
+            return sign + 'Rs ' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+        }
+        return sign + 'Rs ' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    },
+
+    // Plain Indian grouped rupees with paise, for the price and P&L columns.
+    rupees: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0.00'; }
+        const sign = num < 0 ? '-' : '';
+        return sign + 'Rs ' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    },
+
+    // Bare grouped amount with paise, for the disabled level boxes where the
+    // rupee prefix would not fit.
+    amount: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return ''; }
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    },
+
+    // Percent to one decimal place, keeping a second decimal only where it
+    // carries information: 2.28, 10.0, 0.97, 4.98.
+    percent: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0.0'; }
+        let text = num.toFixed(2);
+        if (text.slice(-1) === '0') { text = text.slice(0, -1); }
+        return text + '%';
+    },
+
+    // Explicit plus sign on a gain. Losses already carry their minus sign.
+    signed: function (value, style) {
+        const num = Number(value) || 0;
+        const text = style === 'compact' ? EquityFormat.compact(num) : EquityFormat.rupees(num);
+        return num > 0 ? '+' + text : text;
+    },
+
+    pnlClass: function (value) {
+        const num = Number(value) || 0;
+        if (num > 0) { return 'text-success'; }
+        if (num < 0) { return 'text-error'; }
+        return '';
+    },
+
+    integer: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0'; }
+        return Math.round(num).toLocaleString('en-IN');
+    },
+
+    clockTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    }
+};
+
+const EQUITY_POLL_MS = 30000;
+const EQUITY_FETCH_TIMEOUT_MS = 20000;
+const EQUITY_COLUMN_COUNT = 13;
+let equityPollTimer = null;
+let equityLoading = false;
+
+function equitySetText(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) { return; }
+    el.textContent = text;
+    if (className !== undefined) {
+        el.className = className;
+    }
+}
+
+function equityShowBanner(bannerId, textId, message) {
+    const banner = document.getElementById(bannerId);
+    const text = document.getElementById(textId);
+    if (!banner || !text) { return; }
+    if (message) {
+        text.textContent = message;
+        banner.classList.remove('hidden');
+    } else {
+        banner.classList.add('hidden');
+    }
+}
+
+function equityFilterValues() {
+    const accountEl = document.getElementById('equity-filter-account');
+    const natureEl = document.getElementById('equity-filter-nature');
+    return {
+        account: accountEl ? accountEl.value : 'all',
+        trade_nature: natureEl ? natureEl.value : 'all'
+    };
+}
+
+function equityFilterQuery() {
+    const filters = equityFilterValues();
+    return 'account=' + encodeURIComponent(filters.account) +
+        '&trade_nature=' + encodeURIComponent(filters.trade_nature);
+}
+
+function equityUpdateExportLink() {
+    const link = document.getElementById('equity-export-link');
+    if (!link) { return; }
+    // The export is a pure read that runs the same builder as the table, so it
+    // is a plain link rather than a posted request.
+    link.href = '{{ url_for("equity.api_holdings_export") }}?' + equityFilterQuery();
+}
+
+function equityFiltersChanged() {
+    equityUpdateExportLink();
+    equityLoadHoldings();
+}
+
+// ---------------------------------------------------------------------------
+// Row rendering. Every cell is written with textContent, so a broker supplied
+// symbol or an admin supplied account name can never be treated as markup.
+// ---------------------------------------------------------------------------
+
+function equityCell(text, className) {
+    const td = document.createElement('td');
+    if (className) { td.className = className; }
+    td.textContent = text === null || text === undefined ? '' : String(text);
+    return td;
+}
+
+function equityMessageRow(message) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = EQUITY_COLUMN_COUNT;
+    cell.className = 'text-center py-8 text-base-content/60';
+    cell.textContent = message;
+    row.appendChild(cell);
+    return row;
+}
+
+function equityGroupRow(group) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = EQUITY_COLUMN_COUNT;
+    cell.className = 'bg-base-200 text-xs font-semibold uppercase tracking-wider';
+    cell.textContent = (group.trade_nature || 'Unassigned') + ' (' + group.rows.length + ')';
+    row.appendChild(cell);
+    return row;
+}
+
+// Stop loss and target cell: the value in a disabled editor box, the AE or CE
+// exit mode tag, and a note when the contributing accounts disagree.
+function equityLevelCell(value, tag, levelsMixed) {
+    const td = document.createElement('td');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center gap-2';
+
+    const box = document.createElement('input');
+    box.type = 'text';
+    box.className = 'input input-bordered input-sm w-32 equity-num';
+    box.value = value === null || value === undefined ? '' : EquityFormat.amount(value);
+    box.placeholder = 'Not set';
+    box.disabled = true;
+    box.title = 'Coming soon: editing arrives in a later increment';
+    wrapper.appendChild(box);
+
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-outline badge-sm';
+    badge.textContent = tag || 'CE';
+    badge.title = tag === 'AE' ? 'Auto-exit' : 'Confirm-exit';
+    wrapper.appendChild(badge);
+
+    td.appendChild(wrapper);
+
+    if (levelsMixed) {
+        const note = document.createElement('div');
+        note.className = 'text-xs text-warning';
+        note.textContent = 'Accounts differ';
+        td.appendChild(note);
+    }
+
+    return td;
+}
+
+function equityActionsCell() {
+    const td = document.createElement('td');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-xs btn-outline btn-disabled';
+    button.disabled = true;
+    button.textContent = 'Edit levels';
+    button.title = 'Coming soon: editing arrives in a later increment';
+    td.appendChild(button);
+
+    const note = document.createElement('div');
+    note.className = 'text-xs text-base-content/50';
+    note.textContent = 'Coming soon';
+    td.appendChild(note);
+
+    return td;
+}
+
+function equitySymbolCell(row) {
+    const td = document.createElement('td');
+
+    const symbol = document.createElement('div');
+    symbol.className = 'font-semibold';
+    symbol.textContent = row.symbol;
+    td.appendChild(symbol);
+
+    const meta = document.createElement('div');
+    meta.className = 'text-xs text-base-content/50';
+    meta.textContent = (row.exchange || '') + (row.is_stale ? ' (stale)' : '');
+    td.appendChild(meta);
+
+    return td;
+}
+
+function equityHoldingRow(row) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover';
+
+    tr.appendChild(equitySymbolCell(row));
+    tr.appendChild(equityCell(EquityFormat.integer(row.total_quantity), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.percent(row.stake_pct), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.rupees(row.avg_cost), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.rupees(row.ltp), 'text-right equity-num'));
+    tr.appendChild(equityCell(
+        EquityFormat.percent(row.pnl_pct),
+        ('text-right equity-num ' + EquityFormat.pnlClass(row.pnl_pct)).trim()
+    ));
+    tr.appendChild(equityLevelCell(row.stop_loss, row.exit_mode_tag, row.levels_mixed));
+    tr.appendChild(equityLevelCell(row.target, row.exit_mode_tag, row.levels_mixed));
+    tr.appendChild(equityCell(EquityFormat.percent(row.pledged_pct), 'text-right equity-num'));
+    tr.appendChild(equityCell(
+        EquityFormat.signed(row.gross_pnl),
+        ('text-right equity-num ' + EquityFormat.pnlClass(row.gross_pnl)).trim()
+    ));
+    tr.appendChild(equityCell(EquityFormat.rupees(row.est_costs), 'text-right equity-num'));
+    tr.appendChild(equityCell(
+        EquityFormat.signed(row.net_pnl),
+        ('text-right equity-num ' + EquityFormat.pnlClass(row.net_pnl)).trim()
+    ));
+    tr.appendChild(equityActionsCell());
+
+    return tr;
+}
+
+function equityRenderTable(payload) {
+    const body = document.getElementById('equity-holdings-body');
+    if (!body) { return; }
+
+    body.textContent = '';
+
+    const rows = payload.holdings || [];
+    if (rows.length === 0) {
+        body.appendChild(equityMessageRow(
+            'No holdings for the selected filters. Holdings appear here once the broker reports CNC delivery stock.'
+        ));
+        return;
+    }
+
+    // Trade Nature set to All groups the rows under a divider header per
+    // nature. A single nature is shown ungrouped.
+    if (payload.grouped) {
+        (payload.groups || []).forEach(function (group) {
+            body.appendChild(equityGroupRow(group));
+            group.rows.forEach(function (row) {
+                body.appendChild(equityHoldingRow(row));
+            });
+        });
+    } else {
+        rows.forEach(function (row) {
+            body.appendChild(equityHoldingRow(row));
+        });
+    }
+}
+
+function equityRenderKpi(payload) {
+    const kpi = payload.kpi || {};
+
+    equitySetText('equity-kpi-total-holdings', EquityFormat.integer(kpi.total_holdings));
+    equitySetText('equity-kpi-total-investment', EquityFormat.compact(kpi.total_investment));
+    equitySetText('equity-kpi-current-value', EquityFormat.compact(kpi.current_value));
+    equitySetText(
+        'equity-kpi-net-pnl',
+        EquityFormat.signed(kpi.net_pnl, 'compact'),
+        ('stat-value text-2xl equity-num ' + EquityFormat.pnlClass(kpi.net_pnl)).trim()
+    );
+    equitySetText(
+        'equity-kpi-net-pnl-note',
+        'Gross ' + EquityFormat.signed(kpi.gross_pnl, 'compact') +
+        ', costs ' + EquityFormat.compact(kpi.est_costs)
+    );
+}
+
+function equityRenderNotes(payload) {
+    const filters = payload.filters || {};
+    const denominator = EquityFormat.compact(payload.stake_denominator);
+    equitySetText(
+        'equity-stake-note',
+        filters.account === 'all'
+            ? ('Stake percent is measured against ' + denominator + ', the total allocation of all active accounts.')
+            : ('Stake percent is measured against ' + denominator + ', this account\'s own allocation.')
+    );
+
+    const staleIds = payload.stale_account_ids || [];
+    equityShowBanner(
+        'equity-stale-banner',
+        'equity-stale-text',
+        staleIds.length > 0
+            ? (staleIds.length + ' account(s) did not answer. Their rows show the last known values.')
+            : ''
+    );
+
+    const missing = payload.accounts_missing_rates || [];
+    equityShowBanner(
+        'equity-rates-banner',
+        'equity-rates-text',
+        missing.length > 0
+            ? (missing.length + ' account(s) have no saved brokerage rates, so their Est. Costs is zero. ' +
+               'Set the rates in Equity Settings.')
+            : ''
+    );
+
+    equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(payload.generated_at));
+}
+
+async function equityLoadHoldings() {
+    if (equityLoading) { return; }
+    equityLoading = true;
+
+    const button = document.getElementById('equity-refresh-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetch(
+            '/equity/api/holdings?' + equityFilterQuery() + '&_t=' + Date.now(),
+            { signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS) }
+        );
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowBanner(
+                'equity-stale-banner',
+                'equity-stale-text',
+                'Live data unavailable, showing the last values loaded. ' + (data.message || '')
+            );
+            return;
+        }
+
+        equityRenderKpi(data);
+        equityRenderTable(data);
+        equityRenderNotes(data);
+    } catch (error) {
+        // Degrade to a visible stale marker, never blank the page.
+        equityShowBanner(
+            'equity-stale-banner',
+            'equity-stale-text',
+            'Live data unavailable, showing the last values loaded. Retrying shortly.'
+        );
+        console.error('Equity holdings load failed:', error);
+    } finally {
+        equityLoading = false;
+        if (button) { button.disabled = false; }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    {% if accounts %}
+    equityUpdateExportLink();
+    equityLoadHoldings();
+    equityPollTimer = setInterval(equityLoadHoldings, EQUITY_POLL_MS);
+    {% endif %}
+});
+
+window.addEventListener('beforeunload', function () {
+    if (equityPollTimer) {
+        clearInterval(equityPollTimer);
+        equityPollTimer = null;
+    }
+});
+</script>
+{% endblock %}

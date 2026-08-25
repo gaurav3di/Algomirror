@@ -1,0 +1,413 @@
+{% extends "layout.html" %}
+
+{% block title %}Equity Settings - AlgoMirror{% endblock %}
+
+{% block page_title %}Equity Settings{% endblock %}
+
+{% block content %}
+<style>
+    /* Tabular numerals for every column of aligned digits on this screen. The
+       compiled stylesheet only carries a dark-theme monospace helper, so the
+       rule is stated here so it applies in both themes. */
+    .equity-num { font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h1 class="text-3xl font-bold">Brokerage and Charges</h1>
+            <p class="text-base-content/70 mt-1">
+                Rates per account and broker. Saving inserts a new effective-dated version, it never rewrites history.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
+            {% if accounts %}
+            <button onclick="equityLoadRates()" class="btn btn-ghost btn-sm h-9" id="equity-reload-btn">Reload</button>
+            <button onclick="equitySaveRates()" class="btn btn-primary btn-sm h-9" id="equity-save-btn">Save Rates</button>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Load or save result -->
+    <div class="alert hidden" id="equity-result-banner">
+        <span id="equity-result-text"></span>
+    </div>
+
+    {% if accounts %}
+    <!-- Effective date -->
+    <div class="card bg-base-100 shadow">
+        <div class="card-body p-4">
+            <div class="flex items-center flex-wrap gap-4">
+                <div class="form-control">
+                    <label class="label" for="equity-effective-from">
+                        <span class="label-text">Effective From</span>
+                    </label>
+                    <input type="date" id="equity-effective-from" class="input input-bordered input-sm equity-num">
+                </div>
+                <p class="text-xs text-base-content/60 self-start pt-3 max-w-2xl">
+                    Rates can be dated today or later only. A rate change applies to future calculations, so past cost
+                    figures stay reproducible. Saving for a date that already has a version replaces that version,
+                    every earlier-dated version is left untouched.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rates table -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Rates by Account</h2>
+            <p class="text-sm text-base-content/60">
+                Brokerage and DP/AMC are rupee amounts. Every other field is a percent value, so 0.10 means 0.10 percent.
+            </p>
+
+            <div class="overflow-x-auto">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Account</th>
+                            <th>Broker</th>
+                            <th>Version in Effect</th>
+                            <th class="text-right">Brokerage (Rs per order)</th>
+                            <th class="text-right">STT %</th>
+                            <th class="text-right">Exchange Txn %</th>
+                            <th class="text-right">SEBI %</th>
+                            <th class="text-right">Stamp Duty %</th>
+                            <th class="text-right">GST %</th>
+                            <th class="text-right">DP/AMC (Rs)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for account in accounts %}
+                        <tr class="hover">
+                            <td class="font-semibold">{{ account.account_name }}</td>
+                            <td>{{ account.broker_name or 'Broker not detected' }}</td>
+                            <td>
+                                <span class="text-xs equity-num" id="equity-effective-{{ account.id }}">--</span>
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="brokerage_per_order"
+                                       min="0" step="0.01" value="0">
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="stt_pct"
+                                       min="0" max="100" step="0.00001" value="0">
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="exchange_txn_pct"
+                                       min="0" max="100" step="0.00001" value="0">
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="sebi_pct"
+                                       min="0" max="100" step="0.00001" value="0">
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="stamp_duty_pct"
+                                       min="0" max="100" step="0.00001" value="0">
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="gst_pct"
+                                       min="0" max="100" step="0.01" value="0">
+                            </td>
+                            <td>
+                                <input type="number"
+                                       class="input input-bordered input-sm w-32 equity-num"
+                                       data-account-id="{{ account.id }}"
+                                       data-field="dp_amc_charge"
+                                       min="0" step="0.01" value="0">
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Formula footer. Copy is served by the route so the screen and the
+         cost engine implemented on the server cannot drift apart. -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Est. Costs Formula</h2>
+            <ul class="list-disc list-inside space-y-2 text-sm text-base-content/70">
+                {% for note in cost_formula_notes %}
+                <li>{{ note }}</li>
+                {% endfor %}
+                <li>
+                    An account with no saved rate version is costed at zero and is flagged on the Holdings screen, so a
+                    rate nobody entered can never reach a P&amp;L figure.
+                </li>
+            </ul>
+        </div>
+    </div>
+
+    {% else %}
+    <!-- No accounts at all -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body text-center py-16">
+            <h2 class="text-2xl font-bold mb-2">No Active Accounts</h2>
+            <p class="text-base-content/70 max-w-md mx-auto">
+                Add and connect a trading account before configuring brokerage and charges.
+            </p>
+            <div class="mt-6">
+                <a href="{{ url_for('accounts.add') }}" class="btn btn-primary">Add Account</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Equity Settings: brokerage and statutory charges, versioned by effective
+// date. The only write is to AlgoMirror's own rate table, no broker call.
+// ---------------------------------------------------------------------------
+
+// One shared formatting helper for the whole screen. This screen edits raw
+// rate figures in their own input boxes, so the only formatting it needs is
+// the clock on the last-updated marker.
+const EquityFormat = {
+    clockTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    }
+};
+
+const EQUITY_FETCH_TIMEOUT_MS = 20000;
+const EQUITY_PERCENT_FIELDS = ['stt_pct', 'exchange_txn_pct', 'sebi_pct', 'stamp_duty_pct', 'gst_pct'];
+const EQUITY_RATE_FIELDS = [
+    'brokerage_per_order',
+    'stt_pct',
+    'exchange_txn_pct',
+    'sebi_pct',
+    'stamp_duty_pct',
+    'gst_pct',
+    'dp_amc_charge'
+];
+
+function equitySetText(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) { return; }
+    el.textContent = text;
+    if (className !== undefined) {
+        el.className = className;
+    }
+}
+
+function equityShowResult(message, kind) {
+    const banner = document.getElementById('equity-result-banner');
+    const text = document.getElementById('equity-result-text');
+    if (!banner || !text) { return; }
+    if (!message) {
+        banner.classList.add('hidden');
+        return;
+    }
+    text.textContent = message;
+    banner.className = 'alert ' + (kind === 'error' ? 'alert-error' : 'alert-success');
+}
+
+function equityRateInput(accountId, field) {
+    return document.querySelector(
+        'input[data-account-id="' + accountId + '"][data-field="' + field + '"]'
+    );
+}
+
+function equityApplyRates(payload) {
+    const dateInput = document.getElementById('equity-effective-from');
+    if (dateInput && payload.today) {
+        // Backdating is refused by the server, so the picker starts at today.
+        dateInput.min = payload.today;
+        if (!dateInput.value || dateInput.value < payload.today) {
+            dateInput.value = payload.today;
+        }
+    }
+
+    const defaults = payload.suggested_defaults || {};
+
+    (payload.rates || []).forEach(function (entry) {
+        const id = entry.account_id;
+
+        EQUITY_RATE_FIELDS.forEach(function (field) {
+            const input = equityRateInput(id, field);
+            if (!input || document.activeElement === input) { return; }
+            if (entry.is_configured) {
+                const value = entry[field];
+                input.value = value === null || value === undefined ? 0 : value;
+                input.placeholder = '';
+                return;
+            }
+            // An unconfigured account is costed at zero. Show the suggested
+            // figure as a PLACEHOLDER, never as a value: a placeholder is not
+            // submitted, so pressing Save on a row the admin never reviewed can
+            // no longer commit illustrative rates that would then drive real
+            // Est. Costs and Net P&L. Brokerage plans differ per broker, so a
+            // plausible-looking default is worse than an obvious blank.
+            const suggested = defaults[field];
+            input.value = '';
+            input.placeholder = suggested === null || suggested === undefined ? '0' : String(suggested);
+        });
+
+        if (entry.is_configured) {
+            equitySetText('equity-effective-' + id, 'From ' + entry.effective_from, 'text-xs equity-num');
+        } else {
+            equitySetText(
+                'equity-effective-' + id,
+                'Not configured, costed at zero',
+                'text-xs equity-num text-warning'
+            );
+        }
+    });
+
+    equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(payload.generated_at));
+}
+
+async function equityLoadRates() {
+    const button = document.getElementById('equity-reload-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetch('/equity/api/settings/rates?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'Failed to load the saved rates.', 'error');
+            return;
+        }
+
+        equityApplyRates(data);
+    } catch (error) {
+        // Degrade to a visible marker, never blank the page.
+        equityShowResult('Could not load the saved rates. The boxes show the last values loaded.', 'error');
+        console.error('Equity rates load failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+function equityCollectRates() {
+    const byAccount = {};
+    const inputs = Array.prototype.slice.call(document.querySelectorAll('input[data-account-id][data-field]'));
+
+    for (let index = 0; index < inputs.length; index++) {
+        const input = inputs[index];
+        const accountId = parseInt(input.getAttribute('data-account-id'), 10);
+        const field = input.getAttribute('data-field');
+        const raw = (input.value || '').trim();
+
+        if (!byAccount[accountId]) {
+            byAccount[accountId] = { account_id: accountId, reviewed: false };
+        }
+
+        if (raw === '') {
+            // Blank counts as zero for a row the admin is editing, but on its own
+            // it does not mark the row as reviewed, so an untouched row is never
+            // written as a rate version.
+            byAccount[accountId][field] = 0;
+            continue;
+        }
+
+        const value = parseFloat(raw);
+        if (!isFinite(value) || value < 0) {
+            return { error: 'Every rate must be zero or a positive number.', input: input };
+        }
+        if (EQUITY_PERCENT_FIELDS.indexOf(field) !== -1 && value > 100) {
+            return { error: 'Percent fields cannot be above 100.', input: input };
+        }
+
+        byAccount[accountId][field] = value;
+        byAccount[accountId].reviewed = true;
+    }
+
+    const rates = [];
+    Object.keys(byAccount).forEach(function (key) {
+        const entry = byAccount[key];
+        if (!entry.reviewed) { return; }
+        delete entry.reviewed;
+        rates.push(entry);
+    });
+
+    if (!rates.length) {
+        return {
+            error: 'Enter a rate for at least one account before saving. The grey figures are '
+                 + 'suggestions only and are not saved until you type them in.'
+        };
+    }
+
+    return { rates: rates };
+}
+
+async function equitySaveRates() {
+    const collected = equityCollectRates();
+    if (collected.error) {
+        equityShowResult(collected.error, 'error');
+        if (collected.input) { collected.input.focus(); }
+        return;
+    }
+    if (!collected.rates || collected.rates.length === 0) {
+        equityShowResult('There is nothing to save.', 'error');
+        return;
+    }
+
+    const dateInput = document.getElementById('equity-effective-from');
+    const effectiveFrom = dateInput && dateInput.value ? dateInput.value : '';
+
+    const button = document.getElementById('equity-save-btn');
+    if (button) { button.disabled = true; }
+    equityShowResult('');
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/settings/rates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ effective_from: effectiveFrom, rates: collected.rates }),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'Failed to save the rates.', 'error');
+            return;
+        }
+
+        equityApplyRates(data);
+        equityShowResult(data.message || 'Rates saved as a new version.', 'success');
+    } catch (error) {
+        equityShowResult('Failed to save the rates. Check the connection and try again.', 'error');
+        console.error('Equity rate save failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    {% if accounts %}
+    equityLoadRates();
+    {% endif %}
+});
+</script>
+{% endblock %}
