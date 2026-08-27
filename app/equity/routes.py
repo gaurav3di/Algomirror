@@ -16,12 +16,30 @@ reimplemented here.
 Screens served in increment 1: M1 Dashboard, M2 Accounts, M7 Holdings and
 Settings. Watch List, Place Order, Order Book and Trade Book are not part of
 this increment.
+
+WHERE THE DATA COMES FROM, and why the screens are not three round trips deep:
+    Prices are event driven. They are read from app.utils.equity_price_feed,
+        which is backed by the single shared OpenAlgo WebSocket manager that
+        already serves the F&O screens. A warm feed costs zero broker calls. The
+        REST quote helpers below are a bounded fallback for symbols that have
+        not ticked yet, never the primary path.
+    Funds and holdings stay on REST, because OpenAlgo does not push them, but
+        they are off the critical path in two ways: the two reads for one
+        account are issued concurrently rather than one after the other, and a
+        payload cached inside BROKER_CACHE_TTL_SECONDS is served without calling
+        the broker at all.
 """
 
 import csv
 import io
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import time
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from datetime import date, datetime
 
 from flask import Response, current_app, jsonify, render_template, request
@@ -51,10 +69,13 @@ from app.utils.equity_costs import (
     net_pnl,
     turnover,
 )
+from app.utils.equity_price_feed import equity_price_feed
 from app.utils.equity_ratio import (
+    collateral_from_margin,
     compute_order_qty_ratios,
     invested_percent,
     percent_of,
+    pledge_percent,
     signed_percent_of,
     stake_percent_for_view,
     stock_at_cost,
@@ -70,10 +91,38 @@ BROKER_TIMEOUT_SECONDS = 8
 # Upper bound on the fan-out pool. One worker per account, capped.
 MAX_FETCH_WORKERS = 10
 
+# Funds and holdings for one account are issued together instead of one after
+# the other, so an account costs one broker round trip rather than two. Only the
+# second read is handed to a thread, the first runs on the account's own fan-out
+# worker, so a request adds at most MAX_FETCH_WORKERS extra threads and the
+# inner concurrency cannot multiply with the outer fan-out.
+MAX_INNER_WORKERS = 1
+
+# Freshness window for the broker payloads cached on TradingAccount. Inside this
+# window the screens serve last_funds_data and last_holdings_data and do not
+# call the broker at all. 30 seconds is the house precedent: the F&O funds
+# screen gates the same columns on the same window (app/trading/routes.py). The
+# equity screens poll on that cadence, so the extra readers around one poll (a
+# second tab, a manual refresh, the CSV export) cost nothing at the broker, and
+# a poll only reaches the broker once the cache has actually aged out.
+BROKER_CACHE_TTL_SECONDS = 30
+
 # Upper bound on symbols sent to multiquotes in one call, and on the per-symbol
 # quote fallback that runs when multiquotes is unavailable.
 MAX_QUOTE_SYMBOLS = 100
 MAX_QUOTE_FALLBACK_SYMBOLS = 25
+MAX_QUOTE_FALLBACK_WORKERS = 5
+
+# Wall clock ceiling for the whole REST quote fallback in one request. Prices
+# come from the push feed, so the fallback only ever covers symbols that have
+# not ticked yet, and it must never dominate the request: 25 symbols against an
+# 8 second per call timeout with 5 workers can reach 40 seconds, which is longer
+# than the browser's own abort. Every stage is therefore bounded by this
+# deadline as well as by the symbol counts above.
+MAX_QUOTE_FALLBACK_SECONDS = 6.0
+
+# A broker call with less than this left in the fallback budget is not started.
+MIN_QUOTE_CALL_SECONDS = 0.5
 
 # Exit mode tags shown next to the stop loss and target on the Holdings screen.
 EXIT_MODE_TAGS = {
@@ -88,6 +137,10 @@ _AVG_COST_KEYS = ('average_price', 'avgprice', 'avg_price', 'averageprice')
 _LTP_KEYS = ('ltp', 'last_price', 'lastprice')
 _PNL_PCT_KEYS = ('pnlpercent', 'pnl_percent', 'pnlpercentage', 'pnl_percentage')
 _PLEDGED_KEYS = ('collateralquantity', 'collateral_quantity', 'pledgedquantity', 'pledged_quantity')
+# Fallback for a broker adapter that reports a combined available margin rather
+# than a separate collateral figure. Collateral is then margin minus raw cash.
+_AVAILABLE_MARGIN_KEYS = ('availablemargin', 'available_margin', 'netmargin', 'net_margin')
+_PREV_CLOSE_KEYS = ('prev_close', 'previous_close', 'prevclose', 'previousclose', 'close')
 
 # Illustrative rates from the approved Settings mockup. They are offered to the
 # form as a prefill only and are NEVER used in a cost calculation: an account
@@ -131,6 +184,48 @@ COST_FORMULA_NOTES = [
     'Saving rates inserts a new effective-dated version. Changes apply to future '
     'calculations only and past cost figures stay reproducible.',
 ]
+
+
+# ---------------------------------------------------------------------------
+# Process local caches
+#
+# All three are small, bounded and safe to lose. A fresh process simply makes
+# one more broker read than it strictly had to, which is the safe way to be
+# wrong. Under more than one worker process each worker keeps its own copy, so
+# the worst case is one extra read per worker, never a wrong number.
+# ---------------------------------------------------------------------------
+
+# When each account's holdings payload was last refreshed from the broker.
+# TradingAccount carries a single cache timestamp column, last_data_update, and
+# the F&O funds screen reads it as the age of last_funds_data, so a holdings
+# only read must not advance it (see _refresh_account_cache). Holdings therefore
+# keep their own timestamp here rather than in a new column.
+_HOLDINGS_REFRESHED_AT = {}
+# Funds gets its own stamp for the same reason holdings does: the shared
+# TradingAccount.last_data_update column is also advanced by the trading and
+# accounts blueprints after a POSITIONS or HOLDINGS read, so trusting it here
+# would serve arbitrarily old cash as fresh and never mark it stale.
+_FUNDS_REFRESHED_AT = {}
+
+# Previous close for the current trading day, keyed (symbol, exchange). The push
+# feed subscribes in LTP mode and carries no previous close, but the value does
+# not move during the day, so one REST quote per symbol per day is enough to
+# keep Today's P&L alive. A recorded 0.0 means the broker was asked and reported
+# nothing, which is what stops the fallback asking again on every poll.
+# A previous close the broker would not answer is retried after this long
+# rather than being written off for the day.
+PREV_CLOSE_RETRY_SECONDS = 300.0
+_PREV_CLOSE = {}
+_PREV_CLOSE_DAY = None
+
+# The symbol set the equity screens last asked the price feed to hold, so
+# symbols that are no longer held can be unsubscribed instead of accumulating
+# against the feed's own ceiling.
+_FEED_SYMBOLS = set()
+
+# One lock for all three. Every critical section below is a dict or set
+# operation on plain values, so a single lock is cheaper than three.
+_CACHE_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +298,117 @@ def _first_number(row, keys):
 def _json_error(message, http_status=400):
     """Standard error envelope. The frontend always checks the status field."""
     return jsonify({'status': 'error', 'message': message}), http_status
+
+
+# ---------------------------------------------------------------------------
+# Cache freshness and the process local stores
+# ---------------------------------------------------------------------------
+
+def _cache_age_seconds(timestamp):
+    """Age of a cache timestamp in seconds, or None when it was never written."""
+    if timestamp is None:
+        return None
+    try:
+        return (datetime.utcnow() - timestamp).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_fresh(payload, timestamp):
+    """
+    True when a cached broker payload exists and is inside the freshness window.
+
+    An empty payload is never fresh: there is nothing to serve from it, so the
+    broker is called instead.
+    """
+    if not payload:
+        return False
+    age = _cache_age_seconds(timestamp)
+    return age is not None and age < BROKER_CACHE_TTL_SECONDS
+
+
+def _funds_refreshed_at(account_id):
+    """When this account's funds payload was last read live, or None."""
+    with _CACHE_LOCK:
+        return _FUNDS_REFRESHED_AT.get(account_id)
+
+
+def _mark_funds_refreshed(account_id, when):
+    """Record a live funds read, which is what the funds freshness gate reads."""
+    with _CACHE_LOCK:
+        _FUNDS_REFRESHED_AT[account_id] = when
+
+
+def _holdings_refreshed_at(account_id):
+    """When this account's holdings payload was last read live, or None."""
+    with _CACHE_LOCK:
+        return _HOLDINGS_REFRESHED_AT.get(account_id)
+
+
+def _mark_holdings_refreshed(account_id, when):
+    """Record a live holdings read, which is what the freshness gate reads."""
+    with _CACHE_LOCK:
+        _HOLDINGS_REFRESHED_AT[account_id] = when
+
+
+def _prev_close_cached(key):
+    """
+    Previous close remembered for today, 0.0 when it is not known.
+
+    The store is reset when the calendar day rolls, so yesterday's close can
+    never be reused as today's reference.
+    """
+    global _PREV_CLOSE_DAY
+    today = date.today()
+    with _CACHE_LOCK:
+        if _PREV_CLOSE_DAY != today:
+            _PREV_CLOSE.clear()
+            _PREV_CLOSE_DAY = today
+            return 0.0
+        stored = _PREV_CLOSE.get(key)
+        if isinstance(stored, tuple):
+            # A retry marker, not a price.
+            return 0.0
+        return _to_float(stored)
+
+
+def _prev_close_asked(key):
+    """True when the REST fallback already asked for this symbol's close today."""
+    with _CACHE_LOCK:
+        stored = _PREV_CLOSE.get(key)
+        if stored is None:
+            return False
+        if isinstance(stored, tuple):
+            # Asked and unanswered. Counts as asked only until the
+            # backoff expires, then the symbol is eligible again.
+            return time.monotonic() < stored[1]
+        return True
+
+
+def _remember_prev_close(key, value):
+    """
+    Record a previous close the broker actually answered.
+
+    A real close is remembered for the rest of the day, since it does not move
+    and re-asking would cost a round trip per poll.
+
+    A zero is NOT remembered as final. An unanswered close is usually transient,
+    and treating one zero as permanent would silently disable Today's P&L for
+    that symbol for the whole session. Zero is recorded as a retry-after stamp
+    instead, so the question is asked again a little later rather than on every
+    poll or never again.
+    """
+    global _PREV_CLOSE_DAY
+    today = date.today()
+    number = _to_float(value)
+    with _CACHE_LOCK:
+        if _PREV_CLOSE_DAY != today:
+            _PREV_CLOSE.clear()
+            _PREV_CLOSE_DAY = today
+        if number > 0:
+            _PREV_CLOSE[key] = number
+        else:
+            _PREV_CLOSE[key] = ('retry', time.monotonic() + PREV_CLOSE_RETRY_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +536,10 @@ def _account_credentials(accounts):
     """
     Extract plain credential and cache tuples BEFORE any thread is spawned. No
     ORM object and no lazy load ever crosses a thread boundary in this module.
+
+    The two freshness flags are resolved here as well, for the same reason: the
+    fan-out decides whether to call the broker at all from plain values, without
+    touching an ORM row from a worker thread.
     """
     creds = []
     for account in accounts:
@@ -348,8 +558,97 @@ def _account_credentials(accounts):
             'host_url': account.host_url,
             'cached_funds': dict(cached_funds) if cached_funds else None,
             'cached_holdings': dict(cached_holdings) if cached_holdings else None,
+            'funds_fresh': _is_fresh(cached_funds, _funds_refreshed_at(account.id)),
+            'holdings_fresh': _is_fresh(
+                cached_holdings,
+                _holdings_refreshed_at(account.id)
+            ),
         })
     return creds
+
+
+def _new_snapshot(account_id):
+    """An empty snapshot. Nothing read, nothing cached, nothing stale."""
+    return {
+        'account_id': account_id,
+        'funds': None,
+        'holdings_data': None,
+        'funds_live': False,
+        'holdings_live': False,
+        'from_cache': False,
+        'is_stale': False,
+        'error': None,
+    }
+
+
+def _read_one_broker_call(app, cred, name):
+    """
+    Make one read only broker call by name and return its raw response.
+
+    Never raises: a transport failure comes back as the same error envelope the
+    broker itself would return, so the caller has one shape to handle. Each call
+    builds its own client, so two concurrent reads never share an HTTP session.
+    """
+    with app.app_context():
+        try:
+            client = ExtendedOpenAlgoAPI(
+                api_key=cred['api_key'],
+                host=cred['host_url'],
+                timeout=BROKER_TIMEOUT_SECONDS
+            )
+            return getattr(client, name)()
+        except Exception as exc:
+            return {'status': 'error', 'message': str(exc)}
+
+
+def _read_broker_calls(app, cred, names):
+    """
+    Issue the wanted reads for one account CONCURRENTLY and return name to
+    response.
+
+    The first read runs on the caller's own thread and every other read gets one
+    thread from a pool of at most MAX_INNER_WORKERS, so an account costs one
+    round trip instead of two while the request adds at most one thread per
+    account. If a thread cannot be started the reads simply run in sequence,
+    which is slower and still correct.
+    """
+    if not names:
+        return {}
+    if len(names) == 1:
+        return {names[0]: _read_one_broker_call(app, cred, names[0])}
+
+    inline, deferred = names[0], names[1:]
+
+    executor = None
+    futures = {}
+    try:
+        executor = ThreadPoolExecutor(max_workers=min(MAX_INNER_WORKERS, len(deferred)))
+        futures = {
+            name: executor.submit(_read_one_broker_call, app, cred, name)
+            for name in deferred
+        }
+    except Exception as exc:
+        futures = {}
+        current_app.logger.warning(
+            f'Equity concurrent broker read unavailable, falling back to sequential: {exc}',
+            extra={'event': 'equity_inner_pool_unavailable'}
+        )
+
+    responses = {inline: _read_one_broker_call(app, cred, inline)}
+    for name in deferred:
+        future = futures.get(name)
+        if future is None:
+            responses[name] = _read_one_broker_call(app, cred, name)
+            continue
+        try:
+            responses[name] = future.result()
+        except Exception as exc:
+            responses[name] = {'status': 'error', 'message': str(exc)}
+
+    if executor is not None:
+        executor.shutdown(wait=False)
+
+    return responses
 
 
 def _fetch_account_snapshot(app, cred, want_funds, want_holdings):
@@ -357,33 +656,27 @@ def _fetch_account_snapshot(app, cred, want_funds, want_holdings):
     Read funds and holdings for one account. Never raises: a broker failure
     degrades to the cached payload and marks the account stale, so one bad
     account cannot break the page.
+
+    want_funds and want_holdings are what this account still has to fetch. A
+    side already covered by a fresh cache is filled in by _apply_fresh_cache
+    after the read, and is not stale.
     """
-    snapshot = {
-        'account_id': cred['account_id'],
-        'funds': None,
-        'holdings_data': None,
-        'funds_live': False,
-        'holdings_live': False,
-        'is_stale': False,
-        'error': None,
-    }
+    snapshot = _new_snapshot(cred['account_id'])
 
     with app.app_context():
         try:
             if not cred.get('api_key'):
                 raise ValueError('API key is not available for this account')
 
-            client = ExtendedOpenAlgoAPI(
-                api_key=cred['api_key'],
-                host=cred['host_url'],
-                timeout=BROKER_TIMEOUT_SECONDS
-            )
+            names = []
+            if want_funds:
+                names.append('funds')
+            if want_holdings:
+                names.append('holdings')
+            responses = _read_broker_calls(app, cred, names)
 
             if want_funds:
-                try:
-                    response = client.funds()
-                except Exception as exc:
-                    response = {'status': 'error', 'message': str(exc)}
+                response = responses.get('funds')
                 if isinstance(response, dict) and response.get('status') == 'success':
                     data = response.get('data')
                     snapshot['funds'] = data if isinstance(data, dict) else {}
@@ -392,10 +685,7 @@ def _fetch_account_snapshot(app, cred, want_funds, want_holdings):
                     snapshot['error'] = (response or {}).get('message') or 'Failed to fetch funds'
 
             if want_holdings:
-                try:
-                    response = client.holdings()
-                except Exception as exc:
-                    response = {'status': 'error', 'message': str(exc)}
+                response = responses.get('holdings')
                 if isinstance(response, dict) and response.get('status') == 'success':
                     data = response.get('data')
                     snapshot['holdings_data'] = data if isinstance(data, dict) else {}
@@ -423,22 +713,66 @@ def _fetch_account_snapshot(app, cred, want_funds, want_holdings):
     return snapshot
 
 
+def _apply_fresh_cache(snapshot, cred, want_funds, want_holdings):
+    """
+    Fill the sides that were served from the freshness window.
+
+    This is NOT the stale path. The payload is inside BROKER_CACHE_TTL_SECONDS,
+    so it is current data that simply did not need a broker call, and the
+    account is not flagged stale for it.
+    """
+    if want_funds and cred.get('funds_fresh') and snapshot.get('funds') is None:
+        snapshot['funds'] = cred.get('cached_funds') or {}
+        snapshot['from_cache'] = True
+    if want_holdings and cred.get('holdings_fresh') and snapshot.get('holdings_data') is None:
+        snapshot['holdings_data'] = cred.get('cached_holdings') or {}
+        snapshot['from_cache'] = True
+    return snapshot
+
+
 def _fan_out(creds, want_funds=False, want_holdings=False):
-    """Read every account in parallel. Returns account_id to snapshot."""
+    """
+    Read every account in parallel, skipping the broker for anything a fresh
+    cache already answers. Returns account_id to snapshot.
+    """
     snapshots = {}
     if not creds:
         return snapshots
 
     app = current_app._get_current_object()
 
-    if len(creds) == 1:
-        snapshot = _fetch_account_snapshot(app, creds[0], want_funds, want_holdings)
-        return {snapshot['account_id']: snapshot}
+    # Freshness gate first, so an account fully covered by cache never reaches a
+    # thread, let alone the broker.
+    live = []
+    for cred in creds:
+        needs_funds = bool(want_funds) and not cred.get('funds_fresh')
+        needs_holdings = bool(want_holdings) and not cred.get('holdings_fresh')
+        if not needs_funds and not needs_holdings:
+            snapshots[cred['account_id']] = _apply_fresh_cache(
+                _new_snapshot(cred['account_id']), cred, want_funds, want_holdings
+            )
+            continue
+        live.append((cred, needs_funds, needs_holdings))
 
-    with ThreadPoolExecutor(max_workers=min(MAX_FETCH_WORKERS, len(creds))) as executor:
+    if not live:
+        current_app.logger.debug(
+            f'Equity fan-out served {len(creds)} accounts from cache, no broker call',
+            extra={'event': 'equity_fanout_cached'}
+        )
+        return snapshots
+
+    if len(live) == 1:
+        cred, needs_funds, needs_holdings = live[0]
+        snapshot = _fetch_account_snapshot(app, cred, needs_funds, needs_holdings)
+        _apply_fresh_cache(snapshot, cred, want_funds, want_holdings)
+        snapshots[snapshot['account_id']] = snapshot
+        return snapshots
+
+    creds_by_account = {cred['account_id']: cred for cred, _, _ in live}
+    with ThreadPoolExecutor(max_workers=min(MAX_FETCH_WORKERS, len(live))) as executor:
         futures = [
-            executor.submit(_fetch_account_snapshot, app, cred, want_funds, want_holdings)
-            for cred in creds
+            executor.submit(_fetch_account_snapshot, app, cred, needs_funds, needs_holdings)
+            for cred, needs_funds, needs_holdings in live
         ]
         for future in as_completed(futures):
             try:
@@ -446,6 +780,9 @@ def _fan_out(creds, want_funds=False, want_holdings=False):
             except Exception as exc:
                 current_app.logger.error(f'Equity account fan-out worker failed: {exc}')
                 continue
+            cred = creds_by_account.get(snapshot['account_id'])
+            if cred is not None:
+                _apply_fresh_cache(snapshot, cred, want_funds, want_holdings)
             snapshots[snapshot['account_id']] = snapshot
 
     return snapshots
@@ -458,9 +795,13 @@ def _refresh_account_cache(accounts, snapshots):
     last_data_update is advanced only when funds came back live, because the
     F&O funds screen treats that column as the age of last_funds_data. Writing
     it after a holdings-only read would make stale cash look fresh over there.
+    A live holdings read is timestamped in _HOLDINGS_REFRESHED_AT instead, which
+    is the only thing the holdings freshness gate reads.
     """
     changed = False
     now = datetime.utcnow()
+    refreshed_holdings = []
+    refreshed_funds = []
 
     for account in accounts:
         snapshot = snapshots.get(account.id)
@@ -469,17 +810,29 @@ def _refresh_account_cache(accounts, snapshots):
         if snapshot.get('funds_live') and isinstance(snapshot.get('funds'), dict):
             account.last_funds_data = snapshot['funds']
             account.last_data_update = now
+            refreshed_funds.append(account.id)
             changed = True
         if snapshot.get('holdings_live') and isinstance(snapshot.get('holdings_data'), dict):
             account.last_holdings_data = snapshot['holdings_data']
+            refreshed_holdings.append(account.id)
             changed = True
 
-    if changed:
-        try:
-            db.session.commit()
-        except Exception as exc:
-            db.session.rollback()
-            current_app.logger.warning(f'Could not cache equity broker payloads: {exc}')
+    if not changed:
+        return
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.warning(f'Could not cache equity broker payloads: {exc}')
+        return
+
+    # Stamped only after the payload is actually on disk. Stamping a write that
+    # rolled back would gate the next request onto the previous payload.
+    for account_id in refreshed_holdings:
+        _mark_holdings_refreshed(account_id, now)
+    for account_id in refreshed_funds:
+        _mark_funds_refreshed(account_id, now)
 
 
 def _quote_credential(creds, snapshots):
@@ -497,11 +850,43 @@ def _quote_credential(creds, snapshots):
     return None
 
 
-def _fetch_quotes_individually(app, cred, symbol_keys):
-    """Per-symbol quote fallback for brokers or SDKs without multiquotes."""
+def _seconds_left(deadline):
+    """Wall clock seconds left in a fallback budget, or None when unbounded."""
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _call_timeout(deadline):
+    """
+    Per call timeout for a fallback broker read: the smaller of the interactive
+    timeout and what is left of the budget. Returns 0.0 when there is too little
+    left to be worth a call.
+    """
+    left = _seconds_left(deadline)
+    if left is None:
+        return float(BROKER_TIMEOUT_SECONDS)
+    if left < MIN_QUOTE_CALL_SECONDS:
+        return 0.0
+    return min(float(BROKER_TIMEOUT_SECONDS), left)
+
+
+def _fetch_quotes_individually(app, cred, symbol_keys, deadline=None):
+    """
+    Per-symbol quote fallback for brokers or SDKs without multiquotes.
+
+    Bounded twice over: by MAX_QUOTE_FALLBACK_SYMBOLS and by the wall clock
+    deadline. Whatever has answered when the budget runs out is returned and the
+    rest is abandoned, because the caller has cheaper prices to fall back on and
+    the browser has an abort of its own.
+    """
     quotes = {}
     keys = list(symbol_keys)[:MAX_QUOTE_FALLBACK_SYMBOLS]
     if not keys:
+        return quotes
+
+    timeout = _call_timeout(deadline)
+    if timeout <= 0:
         return quotes
 
     def fetch_one(key):
@@ -511,7 +896,7 @@ def _fetch_quotes_individually(app, cred, symbol_keys):
                 client = ExtendedOpenAlgoAPI(
                     api_key=cred['api_key'],
                     host=cred['host_url'],
-                    timeout=BROKER_TIMEOUT_SECONDS
+                    timeout=timeout
                 )
                 response = client.quotes(symbol=symbol, exchange=exchange)
             except Exception:
@@ -522,24 +907,46 @@ def _fetch_quotes_individually(app, cred, symbol_keys):
                     return (key, data)
             return (key, None)
 
-    with ThreadPoolExecutor(max_workers=min(5, len(keys))) as executor:
-        for key, data in executor.map(fetch_one, keys):
-            if data:
-                quotes[key] = {
-                    'ltp': _to_float(data.get('ltp')),
-                    'prev_close': _to_float(data.get('prev_close')),
-                }
+    executor = ThreadPoolExecutor(max_workers=min(MAX_QUOTE_FALLBACK_WORKERS, len(keys)))
+    try:
+        futures = [executor.submit(fetch_one, key) for key in keys]
+        try:
+            for future in as_completed(futures, timeout=_seconds_left(deadline)):
+                try:
+                    key, data = future.result()
+                except Exception:
+                    continue
+                if data:
+                    quotes[key] = {
+                        'ltp': _to_float(data.get('ltp')),
+                        'prev_close': _to_float(data.get('prev_close')),
+                    }
+        except FuturesTimeoutError:
+            current_app.logger.debug(
+                f'Equity quote fallback stopped at its {MAX_QUOTE_FALLBACK_SECONDS}s '
+                f'budget with {len(quotes)} of {len(keys)} symbols answered',
+                extra={'event': 'equity_quote_fallback_timeout'}
+            )
+    finally:
+        # Never wait here. Waiting would hand the request back exactly the wall
+        # clock the deadline exists to prevent. Calls already running carry the
+        # per call timeout above and end on their own.
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
 
     return quotes
 
 
-def _fetch_quotes(cred, symbol_keys):
+def _fetch_quotes(cred, symbol_keys, deadline=None):
     """
-    Read the last traded price and previous close for a set of symbols.
+    REST FALLBACK ONLY. Read the last traded price and previous close for the
+    symbols the push feed cannot answer yet.
 
     Pure read. Returns (symbol, exchange) to {'ltp', 'prev_close'}, and simply
-    returns fewer entries when the broker is unavailable. Callers fall back to
-    the price implied by the holdings payload.
+    returns fewer entries when the broker is unavailable or the budget runs out.
+    Callers fall back to the price implied by the holdings payload.
     """
     quotes = {}
     keys = list(symbol_keys)[:MAX_QUOTE_SYMBOLS]
@@ -547,12 +954,16 @@ def _fetch_quotes(cred, symbol_keys):
         return quotes
 
     app = current_app._get_current_object()
+    timeout = _call_timeout(deadline)
+    if timeout <= 0:
+        return quotes
+
     response = None
     try:
         client = ExtendedOpenAlgoAPI(
             api_key=cred['api_key'],
             host=cred['host_url'],
-            timeout=BROKER_TIMEOUT_SECONDS
+            timeout=timeout
         )
         response = client.multiquotes(
             symbols=[{'symbol': symbol, 'exchange': exchange} for symbol, exchange in keys]
@@ -581,9 +992,196 @@ def _fetch_quotes(cred, symbol_keys):
 
     missing = [key for key in keys if key not in quotes]
     if missing:
-        quotes.update(_fetch_quotes_individually(app, cred, missing))
+        quotes.update(_fetch_quotes_individually(app, cred, missing, deadline))
 
     return quotes
+
+
+# ---------------------------------------------------------------------------
+# Prices. Pushed by the shared WebSocket feed, with REST as a bounded backstop.
+# ---------------------------------------------------------------------------
+
+def _prune_feed_subscriptions(keys):
+    """
+    Release the symbols the equity screens no longer hold.
+
+    Without this the feed's subscription set only ever grows as holdings change,
+    until it reaches its own ceiling and starts refusing new symbols. Only a
+    view that covers every account may prune, because a filtered view has not
+    seen the symbols it is about to release.
+    """
+    current = set(keys)
+    with _CACHE_LOCK:
+        stale = _FEED_SYMBOLS - current
+        _FEED_SYMBOLS.clear()
+        _FEED_SYMBOLS.update(current)
+
+    if not stale:
+        return
+
+    try:
+        released = equity_price_feed.release(sorted(stale))
+    except Exception as exc:
+        current_app.logger.warning(
+            f'Equity price feed release failed: {exc}',
+            extra={'event': 'equity_feed_release_failed'}
+        )
+        return
+
+    if released:
+        current_app.logger.debug(
+            f'Equity price feed released {released} symbols that are no longer held',
+            extra={'event': 'equity_feed_released'}
+        )
+
+
+def _feed_status_block(stats):
+    """
+    Compact feed health for the JSON payloads, so a screen can say whether the
+    prices it is showing were pushed or fetched.
+
+    source is 'websocket' when every symbol in view came from the push feed,
+    'rest' when none did, 'mixed' in between and 'none' when nothing is held.
+    """
+    try:
+        status = equity_price_feed.status()
+    except Exception as exc:
+        current_app.logger.debug(f'Equity price feed status unavailable: {exc}')
+        status = {}
+
+    requested = stats.get('requested', 0)
+    from_feed = stats.get('from_feed', 0)
+
+    if requested <= 0:
+        source = 'none'
+    elif from_feed >= requested:
+        source = 'websocket'
+    elif from_feed <= 0:
+        source = 'rest'
+    else:
+        source = 'mixed'
+
+    return {
+        'available': bool(status.get('available')),
+        'authenticated': bool(status.get('authenticated')),
+        'live': bool(status.get('authenticated')) and from_feed > 0,
+        'source': source,
+        'subscribed': _to_int(status.get('subscribed')),
+        'pending': _to_int(status.get('pending')),
+        'priced': _to_int(status.get('priced')),
+        'ticks': _to_int(status.get('ticks')),
+        'last_tick_at': status.get('last_tick_at'),
+        'last_tick_age_seconds': status.get('last_tick_age_seconds'),
+        'symbols_requested': requested,
+        'symbols_from_feed': from_feed,
+        'symbols_from_rest': stats.get('from_rest', 0),
+        'rest_fallback_symbols': stats.get('fallback_symbols', 0),
+    }
+
+
+def _resolve_prices(creds, snapshots, symbol_keys, row_closes=None,
+                    want_prev_close=False, prune=False):
+    """
+    Resolve the price of every symbol in view, event driven first.
+
+    The shared WebSocket feed is the primary source and costs no broker call:
+    the symbols in view are subscribed once (idempotent, so this is cheap on
+    every poll) and read straight out of the pushed cache. REST is a backstop
+    for two gaps only, both bounded by MAX_QUOTE_FALLBACK_SECONDS:
+        a symbol the feed has no price for yet, normally just the first poll
+            after it was subscribed,
+        a previous close that is not known for today, because the feed
+            subscribes in LTP mode and does not carry one. It is asked for once
+            per symbol per day and then remembered, so Today's P&L survives
+            without a quote round trip on every poll.
+    With a warm feed and the closes already known, this makes zero broker calls.
+
+    Returns (quotes, feed_block), where quotes keeps the shape the callers
+    already expect: (symbol, exchange) to {'ltp', 'prev_close'}.
+    """
+    keys = sorted(set(symbol_keys))
+    stats = {
+        'requested': len(keys),
+        'from_feed': 0,
+        'from_rest': 0,
+        'fallback_symbols': 0,
+    }
+
+    if not keys:
+        # An empty view is usually a broker read that failed rather than a
+        # portfolio that emptied, so nothing is released on it.
+        return {}, _feed_status_block(stats)
+
+    if prune:
+        _prune_feed_subscriptions(keys)
+
+    feed_prices = {}
+    try:
+        equity_price_feed.ensure_subscribed(keys)
+        feed_prices = equity_price_feed.get_prices(keys)
+    except Exception as exc:
+        current_app.logger.warning(
+            f'Equity price feed unavailable, falling back to REST quotes: {exc}',
+            extra={'event': 'equity_feed_unavailable'}
+        )
+        feed_prices = {}
+
+    row_closes = row_closes or {}
+    quotes = {}
+    for key in keys:
+        ltp = _to_float(feed_prices.get(key))
+        if ltp > 0:
+            stats['from_feed'] += 1
+
+        prev_close = _prev_close_cached(key)
+        if prev_close <= 0:
+            # Last resort for the day's reference price: the close the broker
+            # put on the holding row itself. Free, and better than showing no
+            # Today's P&L at all.
+            prev_close = _to_float(row_closes.get(key))
+
+        quotes[key] = {'ltp': ltp, 'prev_close': prev_close}
+
+    missing_ltp = [key for key in keys if quotes[key]['ltp'] <= 0]
+    missing_close = []
+    if want_prev_close:
+        missing_close = [
+            key for key in keys
+            if quotes[key]['ltp'] > 0
+            and quotes[key]['prev_close'] <= 0
+            and not _prev_close_asked(key)
+        ]
+
+    # Prices first: a missing price is visible on every screen, a missing
+    # previous close costs one KPI. Whatever does not fit the budget is retried
+    # on the next poll.
+    fallback_keys = missing_ltp + missing_close
+    if not fallback_keys:
+        return quotes, _feed_status_block(stats)
+
+    stats['fallback_symbols'] = len(fallback_keys)
+    fetched = _fetch_quotes(
+        _quote_credential(creds, snapshots),
+        fallback_keys,
+        deadline=time.monotonic() + MAX_QUOTE_FALLBACK_SECONDS
+    )
+
+    for key, data in fetched.items():
+        entry = quotes.get(key)
+        if entry is None:
+            continue
+        ltp = _to_float(data.get('ltp'))
+        if ltp > 0 and entry['ltp'] <= 0:
+            entry['ltp'] = ltp
+            stats['from_rest'] += 1
+        prev_close = _to_float(data.get('prev_close'))
+        if prev_close > 0:
+            entry['prev_close'] = prev_close
+        # Recorded even when it is zero: the broker answered, and asking again
+        # on every poll for a close it does not publish is pure latency.
+        _remember_prev_close(key, prev_close)
+
+    return quotes, _feed_status_block(stats)
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +1243,11 @@ def _normalise_broker_holdings(holdings_data):
             'quantity': quantity,
             'avg_cost': avg_cost,
             'broker_ltp': _first_number(row, _LTP_KEYS),
+            # Previous close, when the broker adapter publishes one on the
+            # holding row. The push feed subscribes in LTP mode and carries no
+            # close, so this is a free source for Today's P&L. It is only ever
+            # used when no quote has answered for the symbol today.
+            'prev_close': _first_number(row, _PREV_CLOSE_KEYS),
             'pnl': pnl,
             'pnl_percent': pnl_percent,
             # True when the broker gave no average price and the figure above was
@@ -830,15 +1433,26 @@ def _build_dashboard_payload():
 
     per_account_rows = {}
     symbol_keys = set()
+    row_closes = {}
     for account in accounts:
         rows = _normalise_broker_holdings((snapshots.get(account.id) or {}).get('holdings_data'))
         per_account_rows[account.id] = rows
         for row in rows:
-            symbol_keys.add((row['symbol'], row['exchange']))
+            key = (row['symbol'], row['exchange'])
+            symbol_keys.add(key)
+            close = _to_float(row.get('prev_close'))
+            if close > 0 and key not in row_closes:
+                row_closes[key] = close
 
-    quotes = _fetch_quotes(
-        _quote_credential(context['creds'], snapshots),
-        sorted(symbol_keys)
+    # Prices come from the pushed feed. The dashboard sees every account, so it
+    # is also the view that may release symbols that are no longer held.
+    quotes, price_feed = _resolve_prices(
+        context['creds'],
+        snapshots,
+        symbol_keys,
+        row_closes=row_closes,
+        want_prev_close=True,
+        prune=True
     )
     meta_map = _holding_meta_map([account.id for account in accounts])
 
@@ -888,6 +1502,20 @@ def _build_dashboard_payload():
         if snapshot.get('is_stale'):
             stale_account_ids.append(account.id)
 
+        # Pledge percent. Pledged stock is lodged as collateral at a haircut, so
+        # the collateral the broker reports is smaller than the stock behind it.
+        # Collateral is the account's available margin minus its raw cash, which
+        # is exactly how those two figures are quoted on the F&O dashboard.
+        funds = snapshot.get('funds') or {}
+        cash = _available_cash(snapshot)
+        collateral = _to_float(funds.get('collateral'))
+        if collateral <= 0:
+            # Some broker adapters report an available margin instead of a
+            # separate collateral figure. Derive it from the pair in that case.
+            collateral = collateral_from_margin(
+                _first_number(funds, _AVAILABLE_MARGIN_KEYS), cash
+            )
+
         cards.append({
             'account_id': account.id,
             'account_name': account.account_name,
@@ -899,6 +1527,8 @@ def _build_dashboard_payload():
             'holdings_value': _money(holdings_value),
             'invested_pct': _pct(invested_percent(holdings_value, allocation)),
             'pledged_quantity': pledged_quantity,
+            'pledge_pct': _pct(pledge_percent(collateral, holdings_value)),
+            'collateral': _money(collateral),
             'unrealised_pnl': _money(unrealised),
             'todays_pnl': _money(todays),
             'todays_pnl_available': todays_known,
@@ -929,6 +1559,7 @@ def _build_dashboard_payload():
         'accounts': cards,
         'todays_orders': _build_todays_orders(),
         'stale_account_ids': stale_account_ids,
+        'price_feed': price_feed,
         'generated_at': _iso(datetime.utcnow()),
     }
 
@@ -1058,8 +1689,15 @@ def _build_holdings_payload(account_filter, nature_filter):
         for row in rows:
             symbol_keys.add((row['symbol'], row['exchange']))
 
-    # context['creds'] already covers exactly the accounts in view.
-    quotes = _fetch_quotes(_quote_credential(context['creds'], snapshots), sorted(symbol_keys))
+    # context['creds'] already covers exactly the accounts in view. Prices come
+    # from the pushed feed, and only an unfiltered view may release symbols,
+    # because a view filtered to one account has not seen the rest.
+    quotes, price_feed = _resolve_prices(
+        context['creds'],
+        snapshots,
+        symbol_keys,
+        prune=account_filter is None
+    )
 
     buckets = {}
     stale_account_ids = []
@@ -1243,6 +1881,7 @@ def _build_holdings_payload(account_filter, nature_filter):
         'stale_account_ids': stale_account_ids,
         'accounts_missing_rates': unconfigured_rate_accounts,
         'exit_mode_tags': EXIT_MODE_TAGS,
+        'price_feed': price_feed,
         'generated_at': _iso(datetime.utcnow()),
     }
 
@@ -1359,7 +1998,14 @@ def settings():
 @login_required
 @heavy_rate_limit()
 def api_dashboard():
-    """KPI strip plus one card per account. Reads funds, holdings and quotes."""
+    """
+    KPI strip plus one card per account.
+
+    Prices come from the pushed WebSocket feed and funds and holdings from the
+    account cache, so a poll inside the freshness window makes no broker call at
+    all. The price_feed block in the response says how many of the prices in
+    view were pushed and how many fell back to REST.
+    """
     try:
         payload = _build_dashboard_payload()
     except Exception as exc:

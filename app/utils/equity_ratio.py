@@ -337,3 +337,55 @@ def stake_percent_for_view(
         account_key: None for All Accounts, otherwise the account being viewed.
     """
     return stake_percent(stock_at_cost_value, stake_denominator(allocations, account_key))
+
+
+# A pledged holding is lodged as collateral at a haircut, so the margin it
+# yields is worth less than the stock behind it. Grossing the collateral back
+# up by this factor recovers the value of the stock actually pledged. Brokers
+# commonly apply about 10 percent for liquid equity, hence 0.90.
+DEFAULT_PLEDGE_HAIRCUT = 0.90
+
+
+def pledge_percent(
+    collateral: Any,
+    holdings_value: Any,
+    haircut: Any = DEFAULT_PLEDGE_HAIRCUT,
+) -> float:
+    """
+    Return the share of a holdings value that is pledged, as a PERCENT.
+
+        pledge percent = (collateral / haircut) / holdings_value
+
+    Collateral is the account's available margin minus its raw cash, which is
+    how those two figures are quoted on the dashboard. Worked example from the
+    live server, in lakh: available margin 47.33, cash 46.39, so collateral is
+    0.94; 0.94 / 0.90 is 1.04444; against a holdings value of 1.03 that is
+    101 percent.
+
+    The result is deliberately NOT capped at 100. A real haircut that differs
+    from the assumed one, or a holdings value that has moved since the stock
+    was pledged, can legitimately push it a little above 100 percent, and
+    clamping would hide that rather than report it.
+
+    A missing or non-positive collateral, haircut or holdings value returns 0.0
+    rather than raising.
+    """
+    pledged_collateral = _as_amount(collateral)
+    if pledged_collateral <= 0.0:
+        return 0.0
+    rate = _as_amount(haircut)
+    if rate <= 0.0:
+        return 0.0
+    return percent_of(pledged_collateral / rate, holdings_value)
+
+
+def collateral_from_margin(available_margin: Any, available_cash: Any) -> float:
+    """
+    Collateral implied by an account's available margin and its raw cash.
+
+    Kept next to pledge_percent so the two halves of the dashboard formula sit
+    together. A negative difference (cash reported above margin, which some
+    brokers do transiently) is treated as zero collateral, not as a negative
+    pledge.
+    """
+    return max(0.0, _as_amount(available_margin) - _as_amount(available_cash))

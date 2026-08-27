@@ -320,3 +320,58 @@ class TestSignedPercentOf:
 
     def test_zero_pnl_is_flat_not_negative(self):
         assert equity_ratio.signed_percent_of(0.0, 499884.0) == 0.0
+
+
+class TestPledgePercent:
+    """
+    Pledge percent on the equity Dashboard.
+
+        pledge percent = (collateral / haircut) / holdings_value
+
+    where collateral is available margin minus raw cash. The worked example is
+    mps from the live server, quoted in lakh.
+    """
+
+    LAKH = 100000
+
+    def test_worked_example_from_the_live_server(self):
+        available_margin = 47.33 * self.LAKH
+        cash = 46.39 * self.LAKH
+        holdings_value = 1.03 * self.LAKH
+
+        collateral = equity_ratio.collateral_from_margin(available_margin, cash)
+        assert collateral == pytest.approx(0.94 * self.LAKH, abs=1.0)
+
+        # 0.94 / 0.90 = 1.04444, against holdings of 1.03
+        assert equity_ratio.pledge_percent(collateral, holdings_value) == pytest.approx(
+            101.4, abs=0.1
+        )
+
+    def test_result_is_not_capped_at_one_hundred(self):
+        # The live example itself exceeds 100, so clamping would be wrong.
+        value = equity_ratio.pledge_percent(0.94 * self.LAKH, 1.03 * self.LAKH)
+        assert value > 100.0
+
+    def test_nothing_pledged_is_zero(self):
+        assert equity_ratio.pledge_percent(0, 5.0 * self.LAKH) == 0.0
+        assert equity_ratio.pledge_percent(None, 5.0 * self.LAKH) == 0.0
+
+    def test_zero_holdings_value_yields_zero_not_infinity(self):
+        assert equity_ratio.pledge_percent(1.0 * self.LAKH, 0) == 0.0
+        assert equity_ratio.pledge_percent(1.0 * self.LAKH, None) == 0.0
+
+    def test_negative_collateral_is_treated_as_none_pledged(self):
+        # Some brokers transiently report cash above available margin.
+        assert equity_ratio.collateral_from_margin(46.00, 46.39) == 0.0
+        assert equity_ratio.pledge_percent(-500.0, 5.0 * self.LAKH) == 0.0
+
+    def test_haircut_is_applied(self):
+        # A full 100 percent haircut means collateral equals pledged value.
+        no_haircut = equity_ratio.pledge_percent(1.0 * self.LAKH, 2.0 * self.LAKH, haircut=1.0)
+        assert no_haircut == pytest.approx(50.0)
+        # The default 0.90 grosses the collateral up, so the share is larger.
+        assert equity_ratio.pledge_percent(1.0 * self.LAKH, 2.0 * self.LAKH) > no_haircut
+
+    def test_bad_haircut_yields_zero_not_a_division_error(self):
+        assert equity_ratio.pledge_percent(1.0 * self.LAKH, 2.0 * self.LAKH, haircut=0) == 0.0
+        assert equity_ratio.pledge_percent(1.0 * self.LAKH, 2.0 * self.LAKH, haircut=None) == 0.0

@@ -456,6 +456,35 @@ class ProfessionalWebSocketManager:
         elif mode == 'ltp':
             self.data_processor.register_ltp_handler(handler)
 
+    @staticmethod
+    def _flatten_ltp(raw_ltp):
+        """
+        Normalise the SDK's LTP payload to {'EXCHANGE:SYMBOL': price}.
+
+        The openalgo SDK returns a NESTED mapping:
+            {'NSE': {'RELIANCE': {'timestamp': ..., 'ltp': 2951.5}}}
+        Iterating it directly yields ('NSE', {...}) and float() on that dict
+        raises, which previously left this method returning nothing at all and
+        logging a warning per exchange on every call.
+
+        An already-flat {'NSE:RELIANCE': 2951.5} shape is still accepted, so this
+        keeps working if the SDK changes back.
+        """
+        flat = {}
+        if not isinstance(raw_ltp, dict):
+            return flat
+        for outer_key, outer_value in raw_ltp.items():
+            if isinstance(outer_value, dict):
+                for symbol, payload in outer_value.items():
+                    if isinstance(payload, dict):
+                        price = payload.get('ltp', payload.get('price'))
+                    else:
+                        price = payload
+                    flat[f"{outer_key}:{symbol}"] = price
+            else:
+                flat[str(outer_key)] = outer_value
+        return flat
+
     def get_ltp(self):
         """
         Get cached LTP data from OpenAlgo SDK with zero-value protection.
@@ -466,7 +495,7 @@ class ProfessionalWebSocketManager:
         if self.client:
             try:
                 raw_data = self.client.get_ltp()
-                raw_ltp = raw_data.get('ltp', {})
+                raw_ltp = self._flatten_ltp(raw_data.get('ltp', {}))
 
                 # Validate and cache non-zero values
                 validated_ltp = {}
@@ -485,8 +514,11 @@ class ProfessionalWebSocketManager:
                         logger.warning(f"[WS_LTP] Zero value received for {symbol_key}, using cached value: {self._valid_ltp_cache[symbol_key]}")
                         validated_ltp[symbol_key] = self._valid_ltp_cache[symbol_key]
                     else:
-                        # Zero value and no cache - skip this symbol
-                        logger.warning(f"[WS_LTP] Zero value received for {symbol_key}, no cached value available")
+                        # Zero and nothing cached yet. Normal for a symbol that has
+                        # been subscribed but has not ticked, so this is debug rather
+                        # than a warning: at warning level it fires once per symbol
+                        # per call and floods the shared log.
+                        logger.debug(f"[WS_LTP] No price yet for {symbol_key}")
 
                 return {'ltp': validated_ltp}
             except Exception as e:

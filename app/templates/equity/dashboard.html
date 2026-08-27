@@ -117,7 +117,7 @@
                         <div class="font-semibold equity-num" id="equity-invested-{{ account.id }}">--</div>
                     </div>
                     <div>
-                        <div class="text-xs text-base-content/60">Pledged Qty</div>
+                        <div class="text-xs text-base-content/60">Pledge %</div>
                         <div class="font-semibold equity-num" id="equity-pledged-{{ account.id }}">--</div>
                     </div>
                     <div>
@@ -333,7 +333,8 @@ function equityApplyCard(card) {
     equitySetText('equity-cash-' + id, EquityFormat.compact(card.available_cash));
     equitySetText('equity-holdings-' + id, EquityFormat.compact(card.holdings_value));
     equitySetText('equity-invested-' + id, EquityFormat.percent(card.invested_pct));
-    equitySetText('equity-pledged-' + id, EquityFormat.integer(card.pledged_quantity));
+    // Pledge percent, not a share count: (collateral / 0.90) / holdings value.
+    equitySetText('equity-pledged-' + id, EquityFormat.percent(card.pledge_pct));
     equitySetText('equity-count-' + id, EquityFormat.integer(card.holdings_count));
 
     equitySetText(
