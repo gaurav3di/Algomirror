@@ -228,9 +228,12 @@
                         if (!button) {
                             return;
                         }
-                        button.classList.toggle('bg-base-100', isActive);
+                        // The active module uses the brand primary, the same token as
+                        // the logo mark, so the two cannot drift apart if the theme's
+                        // primary changes and it stays correct in the dark theme.
+                        button.classList.toggle('bg-primary', isActive);
+                        button.classList.toggle('text-primary-content', isActive);
                         button.classList.toggle('shadow-sm', isActive);
-                        button.classList.toggle('text-base-content', isActive);
                         button.classList.toggle('text-base-content/60', !isActive);
                         button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
                     }
