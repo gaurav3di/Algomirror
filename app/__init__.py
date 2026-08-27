@@ -334,6 +334,48 @@ def create_app(config_name=None):
     supertrend_exit_service.start_service()
     app.logger.debug('Supertrend exit monitoring service started', extra={'event': 'supertrend_exit_init'})
 
+    # Initialize equity stop loss and target monitor
+    # The monitor deliberately does not schedule itself: it exposes a plain
+    # callable that the app factory drives from the existing background
+    # scheduler, the same way risk_manager.run_risk_checks is driven. It must
+    # be armed with start() before the first tick, otherwise run_checks()
+    # returns immediately. Guarded so a failure here can never stop the
+    # application from booting, and armed before the job is registered so a
+    # failed add_job leaves the monitor idle rather than half wired.
+    try:
+        from app.utils.equity_exit_monitor import (
+            equity_exit_monitor,
+            run_equity_exit_checks,
+            SCHEDULER_JOB_ID as EQUITY_EXIT_JOB_ID,
+            SCHEDULER_INTERVAL_SECONDS as EQUITY_EXIT_INTERVAL_SECONDS
+        )
+
+        def run_equity_exit_monitor_job(flask_app):
+            """Scheduler entry point: one monitor tick inside a Flask app context."""
+            try:
+                with flask_app.app_context():
+                    run_equity_exit_checks()
+            except Exception as job_error:
+                flask_app.logger.error(f'Error running equity exit checks: {job_error}')
+
+        equity_exit_monitor.start()
+        option_chain_service.scheduler.add_job(
+            func=run_equity_exit_monitor_job,
+            args=[app],
+            trigger='interval',
+            seconds=EQUITY_EXIT_INTERVAL_SECONDS,
+            id=EQUITY_EXIT_JOB_ID,
+            replace_existing=True,
+            max_instances=1,  # Skip a tick rather than overlap two
+            misfire_grace_time=10  # Allow 10s grace for misfired jobs
+        )
+        app.logger.debug(
+            f'Equity exit monitor started ({EQUITY_EXIT_INTERVAL_SECONDS}-second interval)',
+            extra={'event': 'equity_exit_monitor_init'}
+        )
+    except Exception as e:
+        app.logger.error(f'Failed to start equity exit monitor: {e}', exc_info=True)
+
     # Load existing primary and backup accounts within app context
     with app.app_context():
         from app.models import TradingAccount

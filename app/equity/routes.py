@@ -1,21 +1,27 @@
 """
 Equity (CNC delivery) module routes.
 
-Increment 1 is READ ONLY. There is no code path in this module that can place,
-modify or cancel a broker order. The only broker calls made here are funds(),
-holdings(), quotes() and multiquotes(), all of which are pure reads. The only
-writes this module performs go to AlgoMirror's own tables: the equity fund
-allocation, the brokerage rate versions and the cached broker payloads that
-already exist on TradingAccount.
+Increment 1 was read only. Increment 2 adds the transactional surface: M3 Watch
+List, M4 Place Order, M4b Order Status, M5 Order Book, M6 Trade Book and the M7
+Holdings stop loss, target and exit actions.
+
+THIS MODULE STILL NEVER WRITES TO A BROKER ITSELF. Every order that is placed,
+modified, cancelled or exited goes through app.utils.equity_order_engine, which
+is the one place the safety rules are auditable and the one place a broker write
+can happen. The only broker calls made here are reads: funds(), holdings(),
+quotes(), multiquotes(), depth() and search(). Everything else this module
+writes goes to AlgoMirror's own tables: the equity fund allocation, the
+brokerage rate versions, the watch list, the trade natures, the tracked
+holdings, the module preferences and the cached broker payloads that already
+exist on TradingAccount.
 
 Every business formula lives in the two pure engines, app.utils.equity_ratio and
 app.utils.equity_costs. This module converts ORM rows and broker payloads into
 plain numbers, calls the engines and serialises the result. No PRD formula is
 reimplemented here.
 
-Screens served in increment 1: M1 Dashboard, M2 Accounts, M7 Holdings and
-Settings. Watch List, Place Order, Order Book and Trade Book are not part of
-this increment.
+Screens served: M1 Dashboard, M2 Accounts, M3 Watch List, M4 Place Order, M5
+Order Book, M6 Trade Book, M7 Holdings and Settings.
 
 WHERE THE DATA COMES FROM, and why the screens are not three round trips deep:
     Prices are event driven. They are read from app.utils.equity_price_feed,
@@ -41,9 +47,12 @@ from concurrent.futures import (
     as_completed,
 )
 from datetime import date, datetime
+from functools import wraps
 
 from flask import Response, current_app, jsonify, render_template, request
 from flask_login import current_user, login_required
+from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 
 from app import db
 from app.equity import equity_bp
@@ -53,14 +62,39 @@ from app.models import (
     EquityBrokerageRate,
     EquityHolding,
     EquityOrder,
+    EquityOrderSplit,
+    EquitySetting,
+    EquityTrade,
     EquityTradeNature,
+    EquityWatchlistItem,
     TradingAccount,
+    EQUITY_ALERT_DIRECTION_ABOVE,
+    EQUITY_ALERT_DIRECTION_BELOW,
     EQUITY_EXIT_MODE_AUTO,
     EQUITY_EXIT_MODE_CONFIRM,
+    EQUITY_EXIT_REASON_MANUAL,
+    EQUITY_EXIT_REASON_STOP_LOSS,
+    EQUITY_EXIT_REASON_TARGET,
+    EQUITY_FUNDS_ACTION_ABORT,
+    EQUITY_FUNDS_ACTION_SKIP,
+    EQUITY_HOLDING_STATUS_ACTIVE,
+    EQUITY_HOLDING_STATUS_AWAITING_CONFIRM,
+    EQUITY_HOLDING_STATUS_EXIT_INDETERMINATE,
+    EQUITY_HOLDING_STATUSES_CLAIMABLE,
+    EQUITY_HOLDING_STATUSES_EXIT_IN_FLIGHT,
+    EQUITY_ORDER_SOURCE_MANUAL,
+    EQUITY_ORDER_STATUS_CANCELLED,
+    EQUITY_ORDER_STATUS_COMPLETED,
     EQUITY_ORDER_STATUS_PARTIAL,
     EQUITY_ORDER_STATUS_PENDING,
+    EQUITY_ORDER_TYPE_GTT,
+    EQUITY_ORDER_TYPE_LIMIT,
+    EQUITY_ORDER_TYPE_MARKET,
     EQUITY_PRODUCT_CNC,
+    EQUITY_SIDE_BUY,
     EQUITY_SIDE_SELL,
+    EQUITY_SPLIT_STATUS_FAILED,
+    EQUITY_SPLIT_STATUS_SKIPPED,
 )
 from app.utils.equity_costs import (
     BrokerageRates,
@@ -68,6 +102,15 @@ from app.utils.equity_costs import (
     gross_pnl,
     net_pnl,
     turnover,
+)
+from app.utils.equity_order_engine import (
+    EquityOrderError,
+    cancel_order,
+    exit_holding,
+    modify_order,
+    place_multi_account_order,
+    preview_order_split,
+    summarise_splits,
 )
 from app.utils.equity_price_feed import equity_price_feed
 from app.utils.equity_ratio import (
@@ -1009,8 +1052,24 @@ def _prune_feed_subscriptions(keys):
     until it reaches its own ceiling and starts refusing new symbols. Only a
     view that covers every account may prune, because a filtered view has not
     seen the symbols it is about to release.
+
+    The watch list symbols are pinned as well as the ones passed in. Without
+    that, a dashboard poll would release every watch list symbol that is not
+    held, the next watch list poll would resubscribe it, and the two screens
+    would churn the subscription set against each other. Nothing is released at
+    all if the pinned set cannot be read, since releasing on a partial view is
+    the one mistake this function must not make.
     """
     current = set(keys)
+    try:
+        current |= _watchlist_symbol_keys()
+    except Exception as exc:
+        current_app.logger.warning(
+            f'Equity price feed prune skipped, watch list unreadable: {exc}',
+            extra={'event': 'equity_feed_prune_skipped'}
+        )
+        return
+
     with _CACHE_LOCK:
         stale = _FEED_SYMBOLS - current
         _FEED_SYMBOLS.clear()
@@ -1566,40 +1625,30 @@ def _build_dashboard_payload():
 
 def _build_todays_orders():
     """
-    Today's equity orders. Always empty in increment 1 because no code path can
-    place an order yet, so the screen must render an empty state.
+    Today's equity orders for the dashboard, newest first.
+
+    Deliberately today only, with no carry-over of an older resting GTT: this
+    list is headed Today's Orders and a yesterday order in it would be a lie.
+    The Order Status panel and the Order Book do carry an older open GTT, see
+    _order_window.
 
     The day boundary is UTC. Indian market hours (09:15 to 15:30 IST) map to
     03:45 to 10:00 UTC on the same calendar date, so a trading day never
     straddles the UTC boundary.
-    """
-    start_of_day = datetime.combine(datetime.utcnow().date(), datetime.min.time())
 
+    Every key increment 1 published is still published. The extra keys come
+    from _order_payload, which the new screens share.
+    """
     orders = EquityOrder.query.filter(
         EquityOrder.user_id == current_user.id,
-        EquityOrder.placed_at >= start_of_day
-    ).order_by(EquityOrder.placed_at.desc()).all()
+        EquityOrder.placed_at >= _today_start()
+    ).order_by(EquityOrder.placed_at.desc(), EquityOrder.id.desc()).all()
 
-    payload = []
-    for order in orders:
-        splits = order.splits.all()
-        payload.append({
-            'order_id': order.id,
-            'symbol': order.symbol,
-            'exchange': order.exchange,
-            'side': order.side,
-            'order_type': order.order_type,
-            'product': order.product,
-            'total_quantity': order.total_quantity,
-            'filled_quantity': sum(_to_int(split.filled_quantity) for split in splits),
-            'price': _money(order.price) if order.price is not None else None,
-            'stop_loss': _money(order.stop_loss) if order.stop_loss is not None else None,
-            'target': _money(order.target) if order.target is not None else None,
-            'status': order.status,
-            'placed_at': _iso(order.placed_at),
-            'accounts_count': len(splits),
-        })
-    return payload
+    directory = _account_directory()
+    return [
+        _order_payload(order, order.splits.all(), directory)
+        for order in orders
+    ]
 
 
 def _selected_account_id():
@@ -2372,3 +2421,4082 @@ def api_save_settings_rates():
         'Existing versions are unchanged.'
     )
     return jsonify(payload)
+
+
+# ===========================================================================
+# INCREMENT 2: the transactional surface
+#
+# Everything below this line can move real money across five live accounts at
+# once. Three rules decide its shape.
+#
+# 1. Every broker WRITE goes through app.utils.equity_order_engine. Nothing in
+#    this module calls placeorder, modifyorder or cancelorder, and nothing here
+#    posts a GTT endpoint. The only broker calls made here are reads: funds,
+#    holdings, quotes, multiquotes, depth and search.
+#
+# 2. Every SELL is claimed before it is sent. A sell against a tracked holding
+#    is an exit, and the background stop loss monitor can decide to sell the
+#    same shares in the same second. equity_order_engine.exit_holding is the
+#    single helper that locks the row, commits the claim and only then calls
+#    the broker, so the manual path and the monitor meet at the database rather
+#    than at the broker. That is why Place Order routes a SELL through the exit
+#    helper instead of through plain placement.
+#
+# 3. A partial failure is a normal outcome, not an error. Three accounts
+#    placing while two fail is a success for those three. Nothing here rolls
+#    back an order that reached a broker, and one account's failure never stops
+#    another account's order.
+# ===========================================================================
+
+# Upper bound on the exit fan-out started by one request. One worker per
+# account, capped, exactly as the read fan-out above is capped.
+MAX_EXIT_WORKERS = 5
+
+# Symbol search. NSE and BSE cash segments only: this module trades CNC
+# delivery, so a futures or options contract is never a valid result.
+MAX_SEARCH_RESULTS = 40
+SEARCH_EXCHANGES = ('NSE', 'BSE')
+# Instrument type fragments that mark a derivative or an index rather than a
+# tradable equity or ETF. Matched as substrings of the upper cased type.
+NON_EQUITY_INSTRUMENT_FRAGMENTS = ('FUT', 'OPT', 'IDX', 'INDEX')
+
+# Market depth. The PRD asks for five levels of bid and offer.
+DEPTH_LEVELS = 5
+
+# Watch list ceiling. The shared price feed has its own subscription limit and
+# the holdings screens need room inside it, so the watch list is bounded well
+# below it rather than being allowed to consume the whole budget.
+MAX_WATCHLIST_ITEMS = 100
+
+# Order Status sorting, from PRD M4b: open orders surface first.
+ORDER_STATUS_SORT_RANK = {
+    EQUITY_ORDER_STATUS_PENDING: 0,
+    EQUITY_ORDER_STATUS_PARTIAL: 1,
+    EQUITY_ORDER_STATUS_COMPLETED: 2,
+    EQUITY_ORDER_STATUS_CANCELLED: 3,
+}
+
+# Parent order statuses that still count as working.
+OPEN_ORDER_STATUSES = (EQUITY_ORDER_STATUS_PENDING, EQUITY_ORDER_STATUS_PARTIAL)
+
+# Accepted request values, validated rather than trusted.
+VALID_SIDES = (EQUITY_SIDE_BUY, EQUITY_SIDE_SELL)
+VALID_ORDER_TYPES = (
+    EQUITY_ORDER_TYPE_MARKET,
+    EQUITY_ORDER_TYPE_LIMIT,
+    EQUITY_ORDER_TYPE_GTT,
+)
+VALID_ORDER_STATUSES = (
+    EQUITY_ORDER_STATUS_PENDING,
+    EQUITY_ORDER_STATUS_PARTIAL,
+    EQUITY_ORDER_STATUS_COMPLETED,
+    EQUITY_ORDER_STATUS_CANCELLED,
+)
+VALID_EXIT_MODES = (EQUITY_EXIT_MODE_AUTO, EQUITY_EXIT_MODE_CONFIRM)
+VALID_FUNDS_ACTIONS = (EQUITY_FUNDS_ACTION_SKIP, EQUITY_FUNDS_ACTION_ABORT)
+VALID_ALERT_DIRECTIONS = (EQUITY_ALERT_DIRECTION_ABOVE, EQUITY_ALERT_DIRECTION_BELOW)
+
+# Bounds on the stop loss monitor interval, matched to the monitor's own clamp.
+MIN_MONITOR_INTERVAL_SECONDS = 1
+MAX_MONITOR_INTERVAL_SECONDS = 300
+
+# Broker payload key aliases for the depth panel. Adapters differ, so each
+# value is resolved from the first key that carries a number.
+_DEPTH_QTY_KEYS = ('quantity', 'qty', 'volume')
+_DEPTH_ORDERS_KEYS = ('orders', 'no_of_orders', 'numberoforders', 'ordercount', 'order_count')
+_TOTAL_BUY_KEYS = ('totalbuyqty', 'total_buy_qty', 'totalbuyquantity', 'totalbuyquantity')
+_TOTAL_SELL_KEYS = ('totalsellqty', 'total_sell_qty', 'totalsellquantity')
+_UPPER_CIRCUIT_KEYS = ('upper_circuit', 'uppercircuit', 'upper_circuit_limit', 'ucl')
+_LOWER_CIRCUIT_KEYS = ('lower_circuit', 'lowercircuit', 'lower_circuit_limit', 'lcl')
+_LTQ_KEYS = ('ltq', 'last_quantity', 'lasttradequantity', 'last_trade_quantity')
+_VOLUME_KEYS = ('volume', 'totaltradedvolume', 'total_traded_volume', 'vol')
+_LTT_KEYS = ('ltt', 'last_trade_time', 'lasttradetime', 'timestamp')
+_INSTRUMENT_TYPE_KEYS = ('instrumenttype', 'instrument_type', 'instrument', 'segment')
+_SEARCH_NAME_KEYS = ('name', 'company', 'companyname', 'description', 'symbol_name')
+
+
+class _BadRequest(ValueError):
+    """
+    A request the caller got wrong.
+
+    Raised by the readers below and turned into a 400 by the routes, so every
+    endpoint validates its input in one place instead of each one inventing its
+    own error shape.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Request readers. Nothing below this point trusts a request value.
+# ---------------------------------------------------------------------------
+
+def _body():
+    """The JSON request body as a dict. An empty body is an empty dict."""
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise _BadRequest('The request body must be a JSON object')
+    return data
+
+
+def _read_text(data, field, maximum=50, required=True, default=''):
+    """Read a trimmed string field."""
+    value = data.get(field)
+    value = '' if value is None else str(value).strip()
+    if not value:
+        if required:
+            raise _BadRequest(f'{field} is required')
+        return default
+    if len(value) > maximum:
+        raise _BadRequest(f'{field} must be {maximum} characters or fewer')
+    return value
+
+
+def _read_symbol(data, field='symbol', required=True):
+    """Read a trading symbol, upper cased."""
+    value = _read_text(data, field, maximum=50, required=required)
+    return value.upper() if value else value
+
+
+def _read_exchange(data, field='exchange', default='NSE'):
+    """Read an exchange code, upper cased, defaulting to NSE."""
+    value = _read_text(data, field, maximum=20, required=False, default=default)
+    return (value or default).upper()
+
+
+def _read_int(data, field, minimum=None, maximum=None, default=None, required=False):
+    """Read a whole number field."""
+    raw = data.get(field)
+    if raw is None or raw == '':
+        if required:
+            raise _BadRequest(f'{field} is required')
+        return default
+    try:
+        number = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise _BadRequest(f'{field} must be a whole number')
+    if minimum is not None and number < minimum:
+        raise _BadRequest(f'{field} must be {minimum} or more')
+    if maximum is not None and number > maximum:
+        raise _BadRequest(f'{field} must be {maximum} or less')
+    return number
+
+
+def _read_price(data, field, required=False):
+    """
+    Read a positive rupee price, or None when the field is absent or blank.
+
+    A blank price is not the same as a zero price: zero is rejected, because a
+    zero limit price is an order nobody meant to place.
+    """
+    raw = data.get(field)
+    if raw is None or raw == '':
+        if required:
+            raise _BadRequest(f'{field} is required')
+        return None
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        raise _BadRequest(f'{field} must be a number')
+    if not math.isfinite(number) or number <= 0:
+        raise _BadRequest(f'{field} must be a positive number')
+    return round(number, 4)
+
+
+def _read_bool(data, field, default=None):
+    """Read a boolean field, accepting the usual string spellings."""
+    if field not in data or data.get(field) is None:
+        return default
+    value = data.get(field)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ('1', 'true', 'yes', 'on'):
+        return True
+    if text in ('0', 'false', 'no', 'off'):
+        return False
+    raise _BadRequest(f'{field} must be true or false')
+
+
+def _read_choice(data, field, allowed, required=True, default=None):
+    """Read an upper cased value that has to be one of a fixed set."""
+    raw = data.get(field)
+    value = '' if raw is None else str(raw).strip().upper()
+    if not value:
+        if required:
+            raise _BadRequest(f'{field} is required')
+        return default
+    if value not in allowed:
+        raise _BadRequest(f'{field} must be one of {", ".join(allowed)}')
+    return value
+
+
+def _read_account_ids(data, field='account_ids'):
+    """
+    Read the ticked accounts.
+
+    Ownership scoped here as well as inside the engine: an id from another
+    user is refused before any broker call is prepared, never silently ignored
+    and never widened to every account.
+    """
+    raw = data.get(field)
+    if raw is None:
+        raise _BadRequest('Select at least one account')
+    if isinstance(raw, (str, int)):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise _BadRequest(f'{field} must be a list of account ids')
+
+    ids = []
+    for value in raw:
+        try:
+            account_id = int(value)
+        except (TypeError, ValueError):
+            raise _BadRequest(f'Invalid account id in {field}')
+        if account_id not in ids:
+            ids.append(account_id)
+    if not ids:
+        raise _BadRequest('Select at least one account')
+
+    owned = {row.id for row in TradingAccount.query.filter_by(user_id=current_user.id).all()}
+    unknown = [str(account_id) for account_id in ids if account_id not in owned]
+    if unknown:
+        raise _BadRequest(f'Account {", ".join(unknown)} not found')
+    return ids
+
+
+def _read_quantity_overrides(data, field='quantity_overrides'):
+    """Read the per-account Qty overrides from the split table."""
+    raw = data.get(field)
+    if raw in (None, '', {}):
+        return None
+    if not isinstance(raw, dict):
+        raise _BadRequest(f'{field} must be an object of account id to quantity')
+
+    overrides = {}
+    for key, value in raw.items():
+        if value is None or value == '':
+            continue
+        try:
+            account_id = int(key)
+            quantity = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise _BadRequest('A quantity override must be a whole number of shares')
+        if quantity < 0:
+            raise _BadRequest('A quantity override cannot be negative')
+        overrides[account_id] = quantity
+    return overrides or None
+
+
+def _read_trade_nature_id(data, field='trade_nature_id'):
+    """Read an optional trade nature, ownership scoped."""
+    raw = data.get(field)
+    if raw is None or raw == '' or str(raw).strip().lower() in ('all', 'none'):
+        return None
+    try:
+        nature_id = int(raw)
+    except (TypeError, ValueError):
+        raise _BadRequest('Invalid trade nature')
+    if _owned_trade_nature(nature_id) is None:
+        raise _BadRequest('Trade nature not found')
+    return nature_id
+
+
+def _read_holding_id(data, field='holding_id'):
+    """Read a holding id and resolve it, ownership scoped."""
+    holding_id = _read_int(data, field, minimum=1, required=True)
+    holding = _owned_holding(holding_id)
+    if holding is None:
+        raise _BadRequest('Holding not found')
+    return holding
+
+
+def _arg(name, default=''):
+    """One trimmed query string argument."""
+    return (request.args.get(name) or default).strip()
+
+
+def _arg_choice(name, allowed, label=None):
+    """
+    One upper cased query string filter that has to be in a fixed set.
+
+    Returns (value_or_None, error_or_None). Blank and 'all' both mean no
+    filter.
+    """
+    raw = _arg(name).upper()
+    if not raw or raw == 'ALL':
+        return None, None
+    if raw not in allowed:
+        return None, f'Invalid {label or name} filter'
+    return raw, None
+
+
+def _arg_symbol(name='symbol'):
+    """One symbol filter, upper cased. Blank means no filter."""
+    value = _arg(name).upper()
+    if not value or value == 'ALL':
+        return None
+    return value[:50]
+
+
+def _arg_date(name):
+    """
+    One YYYY-MM-DD query string filter.
+
+    Returns (date_or_None, error_or_None).
+    """
+    raw = _arg(name)
+    if not raw:
+        return None, None
+    try:
+        return datetime.strptime(raw, '%Y-%m-%d').date(), None
+    except (TypeError, ValueError):
+        return None, f'Invalid {name} date, expected YYYY-MM-DD'
+
+
+def _filter_account_id():
+    """
+    Account filter for the order and trade books.
+
+    Deliberately NOT _selected_account_id: a book has to stay filterable by an
+    account that has since been deactivated, otherwise its history becomes
+    unreachable. Ownership is still scoped on both the id and the owner.
+
+    Returns (account_id_or_None, error_or_None).
+    """
+    raw = _arg('account')
+    if not raw or raw.lower() == 'all':
+        return None, None
+    try:
+        account_id = int(raw)
+    except (TypeError, ValueError):
+        return None, 'Invalid account filter'
+    if _owned_account(account_id) is None:
+        return None, 'Account not found'
+    return account_id, None
+
+
+# ---------------------------------------------------------------------------
+# Ownership scoped lookups for the increment 2 tables
+# ---------------------------------------------------------------------------
+
+def _owned_watchlist_item(item_id):
+    """One watch list row, scoped by BOTH id and owner."""
+    return EquityWatchlistItem.query.filter_by(
+        id=item_id, user_id=current_user.id
+    ).first()
+
+
+def _owned_trade_nature(nature_id):
+    """One trade nature, scoped by BOTH id and owner."""
+    return EquityTradeNature.query.filter_by(
+        id=nature_id, user_id=current_user.id
+    ).first()
+
+
+def _owned_holding(holding_id):
+    """One tracked holding, scoped by BOTH id and owner."""
+    return EquityHolding.query.filter_by(
+        id=holding_id, user_id=current_user.id
+    ).first()
+
+
+def _owned_order(order_id):
+    """One parent equity order, scoped by BOTH id and owner."""
+    return EquityOrder.query.filter_by(
+        id=order_id, user_id=current_user.id
+    ).first()
+
+
+def _all_trade_natures():
+    """
+    Every trade nature this user has, active and inactive, in display order.
+
+    Settings needs the inactive ones so a nature can be brought back. The
+    dropdowns keep using _trade_natures(), which is the active set.
+    """
+    natures = EquityTradeNature.query.filter_by(
+        user_id=current_user.id
+    ).order_by(EquityTradeNature.display_order, EquityTradeNature.id).all()
+
+    if not natures:
+        EquityTradeNature.get_or_create_defaults(current_user.id)
+        natures = EquityTradeNature.query.filter_by(
+            user_id=current_user.id
+        ).order_by(EquityTradeNature.display_order, EquityTradeNature.id).all()
+    return natures
+
+
+def _account_directory():
+    """
+    Every account this user owns, active or not, keyed by id.
+
+    Order and trade book rows can reference an account that was deactivated
+    after the order was placed, so the directory is deliberately wider than
+    _active_accounts().
+    """
+    rows = TradingAccount.query.filter_by(user_id=current_user.id).all()
+    return {
+        row.id: {
+            'account_name': row.account_name,
+            'broker_name': row.broker_name,
+            'is_active': bool(row.is_active),
+        }
+        for row in rows
+    }
+
+
+def _equity_settings():
+    """This user's equity preferences, created with defaults on first use."""
+    return EquitySetting.get_or_create(current_user.id)
+
+
+def _today_start():
+    """
+    Start of today in the same clock EquityOrder.placed_at is written in.
+
+    UTC, matching _build_todays_orders. Indian market hours map to 03:45 to
+    10:00 UTC on the same calendar date, so a trading day never straddles the
+    boundary.
+    """
+    return datetime.combine(datetime.utcnow().date(), datetime.min.time())
+
+
+def _watchlist_symbol_keys():
+    """(symbol, exchange) for every watch list row of the current user."""
+    rows = EquityWatchlistItem.query.filter_by(user_id=current_user.id).all()
+    return {
+        ((row.symbol or '').strip().upper(), (row.exchange or 'NSE').strip().upper())
+        for row in rows
+        if row.symbol
+    }
+
+
+# ---------------------------------------------------------------------------
+# Serialisers shared by Order Status, Order Book, Trade Book and the split view
+# ---------------------------------------------------------------------------
+
+def _split_payload(split, directory=None):
+    """
+    One account's share of an order, as JSON.
+
+    Every figure here is the point-in-time snapshot taken when the order was
+    created (PRD 9.1). Nothing on this row is recalculated from today's
+    allocations or today's cash.
+    """
+    directory = directory or {}
+    account = directory.get(split.account_id) or {}
+    return {
+        'split_id': split.id,
+        'order_id': split.equity_order_id,
+        'account_id': split.account_id,
+        'account_name': account.get('account_name'),
+        'broker_name': account.get('broker_name'),
+        'qty_ratio': _pct(split.qty_ratio_at_order),
+        'ratio_quantity': _to_int(split.ratio_quantity),
+        'quantity': _to_int(split.quantity),
+        'qty_overridden': bool(split.qty_overridden),
+        'est_value': _money(split.est_value) if split.est_value is not None else None,
+        'cash_balance': (
+            _money(split.cash_balance_at_order)
+            if split.cash_balance_at_order is not None else None
+        ),
+        'fill_status': split.fill_status,
+        'filled_quantity': _to_int(split.filled_quantity),
+        'avg_fill_price': (
+            _money(split.avg_fill_price) if split.avg_fill_price is not None else None
+        ),
+        'broker_order_id': split.broker_order_id,
+        'broker_gtt_id': split.broker_gtt_id,
+        'broker_order_status': split.broker_order_status,
+        'error_message': split.error_message,
+        'error_type': split.error_type,
+        'attempt_count': _to_int(split.attempt_count),
+        'placed_at': _iso(split.placed_at),
+        'last_synced_at': _iso(split.last_synced_at),
+        'is_open': bool(split.is_open),
+        'is_terminal': bool(split.is_terminal),
+        'is_safe_to_retry': bool(split.is_safe_to_retry),
+    }
+
+
+def _skipped_split_payload(account_id, directory, quantity, ratio_quantity,
+                           qty_ratio, est_value, reason,
+                           fill_status=None):
+    """
+    A split-shaped row for an account that never reached the broker.
+
+    An account skipped before placement has no EquityOrderSplit of its own on
+    the claim-backed sell path, but the screen still has to show it in the same
+    table as the accounts that did place. Keys match _split_payload exactly so
+    the template binds once.
+    """
+    account = (directory or {}).get(account_id) or {}
+    return {
+        'split_id': None,
+        'order_id': None,
+        'account_id': account_id,
+        'account_name': account.get('account_name'),
+        'broker_name': account.get('broker_name'),
+        'qty_ratio': _pct(qty_ratio),
+        'ratio_quantity': _to_int(ratio_quantity),
+        'quantity': _to_int(quantity),
+        'qty_overridden': False,
+        'est_value': _money(est_value) if est_value is not None else None,
+        'cash_balance': None,
+        'fill_status': fill_status or EQUITY_SPLIT_STATUS_SKIPPED,
+        'filled_quantity': 0,
+        'avg_fill_price': None,
+        'broker_order_id': None,
+        'broker_gtt_id': None,
+        'broker_order_status': None,
+        'error_message': reason,
+        'error_type': None,
+        'attempt_count': 0,
+        'placed_at': None,
+        'last_synced_at': None,
+        'is_open': False,
+        'is_terminal': True,
+        'is_safe_to_retry': False,
+    }
+
+
+def _order_payload(order, splits, directory=None, include_splits=False):
+    """
+    One parent order, as JSON, with the M4b Accounts count.
+
+    Two counts are published because they answer different questions:
+        accounts_placed  reached the broker and is either working or filled.
+                         This is the numerator in the "4/5" the PRD asks for.
+        accounts_filled  actually completed.
+    status_reason is the short explanation shown next to PARTIAL, for example
+    "1 failed", and comes from the engine so the wording cannot drift.
+    """
+    splits = list(splits or [])
+    counts = summarise_splits(splits)
+    placed = counts['open'] + counts['filled']
+    total = counts['total']
+
+    payload = {
+        'order_id': order.id,
+        'symbol': order.symbol,
+        'exchange': order.exchange,
+        'side': order.side,
+        'order_type': order.order_type,
+        'product': order.product,
+        'total_quantity': _to_int(order.total_quantity),
+        'filled_quantity': sum(_to_int(split.filled_quantity) for split in splits),
+        'leftover_quantity': _to_int(order.leftover_quantity),
+        'price': _money(order.price) if order.price is not None else None,
+        'trigger_price': (
+            _money(order.trigger_price) if order.trigger_price is not None else None
+        ),
+        'stop_loss': _money(order.stop_loss) if order.stop_loss is not None else None,
+        'target': _money(order.target) if order.target is not None else None,
+        'status': order.status,
+        'status_reason': counts['reason'],
+        'source': order.source,
+        'trade_nature_id': order.trade_nature_id,
+        'trade_nature': order.trade_nature.name if order.trade_nature else None,
+        'insufficient_funds_action': order.insufficient_funds_action,
+        'error_message': order.error_message,
+        'placed_at': _iso(order.placed_at),
+        'cancelled_at': _iso(order.cancelled_at),
+        'updated_at': _iso(order.updated_at),
+        # accounts_count is the increment 1 name and is kept so the dashboard
+        # keeps working. accounts_selected is the same number under the name
+        # the new screens use.
+        'accounts_count': total,
+        'accounts_selected': total,
+        'accounts_placed': placed,
+        'accounts_filled': counts['filled'],
+        'accounts_open': counts['open'],
+        'accounts_label': f'{placed}/{total}',
+        'counts': counts,
+        'is_open': bool(order.is_open),
+        'can_modify': bool(order.is_open),
+        'can_cancel': bool(order.is_open),
+    }
+    if include_splits:
+        payload['splits'] = [_split_payload(split, directory) for split in splits]
+    return payload
+
+
+def _trade_payload(trade, split, order, directory=None):
+    """One fill, with the parent order it belongs to."""
+    account = (directory or {}).get(split.account_id) or {}
+    quantity = _to_int(trade.executed_quantity)
+    price = _to_float(trade.execution_price)
+    return {
+        'trade_id': trade.id,
+        'split_id': split.id,
+        'order_id': order.id,
+        'account_id': split.account_id,
+        'account_name': account.get('account_name'),
+        'broker_name': account.get('broker_name'),
+        'symbol': order.symbol,
+        'exchange': (trade.exchange or order.exchange),
+        'side': order.side,
+        'order_type': order.order_type,
+        'product': order.product,
+        'source': order.source,
+        'trade_nature_id': order.trade_nature_id,
+        'trade_nature': order.trade_nature.name if order.trade_nature else None,
+        'execution_price': _money(price),
+        'executed_quantity': quantity,
+        'trade_value': _money(turnover(price, quantity)),
+        'executed_at': _iso(trade.executed_at),
+        'broker_trade_id': trade.broker_trade_id,
+        'broker_order_id': split.broker_order_id,
+        'order_status': order.status,
+        'order_placed_at': _iso(order.placed_at),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tracked holdings
+#
+# The Holdings screen reads the broker payload directly, but the stop loss and
+# target monitor and the exit claim both work on EquityHolding rows. A row with
+# a stale quantity is a row the monitor could sell the wrong number of shares
+# against, so the quantity is refreshed from the broker at the two moments that
+# matter: when a level is armed and when a sell is prepared.
+# ---------------------------------------------------------------------------
+
+def _holding_key(account_id, symbol, exchange):
+    """The key EquityHolding is unique on."""
+    return (
+        account_id,
+        (symbol or '').strip().upper(),
+        (exchange or 'NSE').strip().upper(),
+    )
+
+
+def _sync_holding_rows(accounts, snapshots, symbol=None, exchange=None):
+    """
+    Upsert this user's EquityHolding rows from the broker holdings payload.
+
+    What it writes: quantity, avg_cost and pledged_quantity, which are the
+    broker's facts.
+
+    What it NEVER touches: exit_status and the whole exit claim, stop_loss,
+    target, exit_mode, trade_nature_id and the breach records. Those are
+    AlgoMirror's own state and a broker read must not be able to disarm a stop
+    loss or reopen a claim.
+
+    A tracked row the broker no longer reports has been sold, so its quantity
+    is zeroed. That is only ever done from a payload actually in hand (live or
+    inside the freshness window) and never against a row with a sell already in
+    flight, whose quantity is settled at claim time.
+
+    Returns {(account_id, SYMBOL, EXCHANGE): EquityHolding}.
+    """
+    accounts = list(accounts or [])
+    if not accounts:
+        return {}
+
+    wanted_symbol = (symbol or '').strip().upper() or None
+    wanted_exchange = (exchange or '').strip().upper() or None
+    account_ids = [account.id for account in accounts]
+
+    tracked = {}
+    for row in EquityHolding.query.filter(
+        EquityHolding.user_id == current_user.id,
+        EquityHolding.account_id.in_(account_ids)
+    ).all():
+        tracked[_holding_key(row.account_id, row.symbol, row.exchange)] = row
+
+    settings = _equity_settings()
+    default_exit_mode = (
+        settings.default_exit_mode if settings else EQUITY_EXIT_MODE_CONFIRM
+    )
+
+    changed = False
+    for account in accounts:
+        snapshot = snapshots.get(account.id) or {}
+        # from_cache means the payload came out of the freshness window, which
+        # is current data that simply did not need a broker call.
+        payload_usable = bool(
+            snapshot.get('holdings_live') or snapshot.get('from_cache')
+        )
+        seen = set()
+
+        for broker_row in _normalise_broker_holdings(snapshot.get('holdings_data')):
+            if wanted_symbol and broker_row['symbol'] != wanted_symbol:
+                continue
+            if wanted_exchange and broker_row['exchange'] != wanted_exchange:
+                continue
+
+            key = _holding_key(account.id, broker_row['symbol'], broker_row['exchange'])
+            seen.add(key)
+
+            holding = tracked.get(key)
+            if holding is None:
+                holding = EquityHolding(
+                    user_id=current_user.id,
+                    account_id=account.id,
+                    symbol=broker_row['symbol'],
+                    exchange=broker_row['exchange'],
+                    quantity=0,
+                    exit_mode=default_exit_mode,
+                    exit_status=EQUITY_HOLDING_STATUS_ACTIVE,
+                )
+                db.session.add(holding)
+                tracked[key] = holding
+                changed = True
+
+            quantity = max(_to_int(broker_row['quantity']), 0)
+            if _to_int(holding.quantity) != quantity:
+                holding.quantity = quantity
+                changed = True
+
+            avg_cost = _to_float(broker_row['avg_cost'])
+            if avg_cost > 0 and _to_float(holding.avg_cost) != avg_cost:
+                holding.avg_cost = avg_cost
+                changed = True
+
+            pledged = max(_to_int(broker_row['pledged_quantity']), 0)
+            if _to_int(holding.pledged_quantity) != pledged:
+                holding.pledged_quantity = pledged
+                changed = True
+
+        if not payload_usable:
+            continue
+
+        for key, holding in tracked.items():
+            if key[0] != account.id or key in seen:
+                continue
+            if wanted_symbol and key[1] != wanted_symbol:
+                continue
+            if wanted_exchange and key[2] != wanted_exchange:
+                continue
+            if holding.is_exit_in_flight:
+                continue
+            if _to_int(holding.quantity) != 0:
+                holding.quantity = 0
+                holding.pledged_quantity = 0
+                changed = True
+
+    if changed:
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            current_app.logger.error(f'Could not sync equity holding rows: {exc}')
+            tracked = {}
+            for row in EquityHolding.query.filter(
+                EquityHolding.user_id == current_user.id,
+                EquityHolding.account_id.in_(account_ids)
+            ).all():
+                tracked[_holding_key(row.account_id, row.symbol, row.exchange)] = row
+
+    return tracked
+
+
+def _holding_payload(holding, directory=None, ltp=0.0):
+    """One tracked holding row, including its exit claim state."""
+    account = (directory or {}).get(holding.account_id) or {}
+    quantity = _to_int(holding.quantity)
+    avg_cost = _to_float(holding.avg_cost)
+    price = _to_float(ltp) or _to_float(holding.last_price)
+    return {
+        'holding_id': holding.id,
+        'account_id': holding.account_id,
+        'account_name': account.get('account_name'),
+        'broker_name': account.get('broker_name'),
+        'symbol': holding.symbol,
+        'exchange': holding.exchange,
+        'quantity': quantity,
+        'pledged_quantity': _to_int(holding.pledged_quantity),
+        'sellable_quantity': _to_int(holding.sellable_quantity),
+        'avg_cost': _money(avg_cost),
+        'ltp': _money(price),
+        'gross_pnl': _money(gross_pnl(price, avg_cost, quantity)) if avg_cost > 0 else None,
+        'trade_nature_id': holding.trade_nature_id,
+        'trade_nature': holding.trade_nature.name if holding.trade_nature else None,
+        'stop_loss': _money(holding.stop_loss) if holding.stop_loss is not None else None,
+        'target': _money(holding.target) if holding.target is not None else None,
+        'exit_mode': holding.exit_mode,
+        'exit_mode_tag': EXIT_MODE_TAGS.get(
+            holding.exit_mode, EXIT_MODE_TAGS[EQUITY_EXIT_MODE_CONFIRM]
+        ),
+        'exit_status': holding.exit_status,
+        'exit_reason': holding.exit_reason,
+        'exit_quantity': _to_int(holding.exit_quantity),
+        'exit_broker_order_id': holding.exit_broker_order_id,
+        'exit_split_id': holding.exit_split_id,
+        'exit_error': holding.exit_error,
+        'exit_claimed_at': _iso(holding.exit_claimed_at),
+        'exit_submitted_at': _iso(holding.exit_submitted_at),
+        'exit_completed_at': _iso(holding.exit_completed_at),
+        'is_exit_in_flight': bool(holding.is_exit_in_flight),
+        'is_monitorable': bool(holding.is_monitorable),
+        'has_exit_levels': bool(holding.has_exit_levels),
+        'sl_hit_at': _iso(holding.sl_hit_at),
+        'sl_hit_price': _money(holding.sl_hit_price) if holding.sl_hit_price else None,
+        'tp_hit_at': _iso(holding.tp_hit_at),
+        'tp_hit_price': _money(holding.tp_hit_price) if holding.tp_hit_price else None,
+        'last_monitored_at': _iso(holding.last_monitored_at),
+        'awaiting_confirm': holding.exit_status == EQUITY_HOLDING_STATUS_AWAITING_CONFIRM,
+        'needs_reconciliation': (
+            holding.exit_status == EQUITY_HOLDING_STATUS_EXIT_INDETERMINATE
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The exit fan-out
+#
+# Every job here goes through equity_order_engine.exit_holding, which is the
+# ONE helper that claims a holding before selling it (safety rule 1). This
+# function only supplies concurrency and failure isolation, it never places
+# anything itself.
+# ---------------------------------------------------------------------------
+
+def _exit_error_result(holding_id, message, account_id=None):
+    """The shape exit_holding returns, for a failure that never reached it."""
+    return {
+        'status': 'error',
+        'holding_id': holding_id,
+        'account_id': account_id,
+        'message': message,
+        'claimed': False,
+        'indeterminate': False,
+        'broker_order_id': None,
+        'order_id': None,
+        'split_id': None,
+        'quantity': 0,
+        'attempts': 0,
+    }
+
+
+def _exit_worker(app, user_id, holding_id, kwargs):
+    """
+    One account's claim-and-place exit on its own thread.
+
+    Rule 8: the app object and every plain value are captured before the thread
+    starts, the body runs inside its own app context with its own session, and
+    a crash is contained to this account.
+    """
+    with app.app_context():
+        try:
+            return exit_holding(user_id=user_id, holding_id=holding_id, **kwargs)
+        except Exception as exc:
+            current_app.logger.error(
+                f'Equity exit worker failed for holding {holding_id}: {exc}'
+            )
+            return _exit_error_result(holding_id, f'Exit failed unexpectedly: {exc}')
+        finally:
+            db.session.remove()
+
+
+def _fan_out_exits(jobs, **common):
+    """
+    Run one engine exit per holding, concurrently and independently.
+
+    Args:
+        jobs: list of dicts with holding_id and an optional quantity. A job
+            without a quantity sells the whole sellable quantity, resolved
+            under the claim's own row lock rather than from a number this
+            request read earlier.
+        **common: forwarded to exit_holding (reason, order_type, price,
+            trigger_price, allow_from, gtt_trigger_leg).
+
+    Returns the list of exit_holding results, in job order.
+    """
+    jobs = list(jobs or [])
+    if not jobs:
+        return []
+
+    app = current_app._get_current_object()
+    user_id = current_user.id
+
+    prepared = []
+    for job in jobs:
+        kwargs = dict(common)
+        if 'quantity' in job:
+            kwargs['quantity'] = job['quantity']
+        prepared.append((job['holding_id'], kwargs))
+
+    if len(prepared) == 1:
+        holding_id, kwargs = prepared[0]
+        try:
+            return [exit_holding(user_id=user_id, holding_id=holding_id, **kwargs)]
+        except Exception as exc:
+            current_app.logger.error(f'Equity exit failed for holding {holding_id}: {exc}')
+            return [_exit_error_result(holding_id, f'Exit failed unexpectedly: {exc}')]
+
+    results = []
+    bound = min(MAX_EXIT_WORKERS, len(prepared))
+    with ThreadPoolExecutor(max_workers=bound) as executor:
+        futures = [
+            (holding_id, executor.submit(_exit_worker, app, user_id, holding_id, kwargs))
+            for holding_id, kwargs in prepared
+        ]
+        for holding_id, future in futures:
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                current_app.logger.error(
+                    f'Equity exit crashed for holding {holding_id}: {exc}'
+                )
+                results.append(
+                    _exit_error_result(holding_id, f'Exit crashed: {exc}')
+                )
+    return results
+
+
+def _exit_counts(results):
+    """Count exit outcomes and describe them in one line."""
+    placed = sum(1 for result in results if result['status'] == 'success')
+    skipped = sum(1 for result in results if result['status'] == 'skipped')
+    indeterminate = sum(1 for result in results if result['status'] == 'indeterminate')
+    failed = sum(1 for result in results if result['status'] == 'error')
+
+    if not results:
+        status = 'error'
+    elif placed == 0:
+        status = 'error'
+    elif placed < len(results):
+        status = 'partial'
+    else:
+        status = 'success'
+
+    parts = [f'{placed} of {len(results)} accounts placed']
+    if failed:
+        parts.append(f'{failed} failed')
+    if skipped:
+        parts.append(f'{skipped} skipped')
+    if indeterminate:
+        parts.append(f'{indeterminate} unconfirmed, verify at the broker')
+
+    return {
+        'status': status,
+        'message': ', '.join(parts),
+        'accounts_placed': placed,
+        'accounts_skipped': skipped,
+        'accounts_failed': failed,
+        'accounts_indeterminate': indeterminate,
+        'accounts_selected': len(results),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Broker reads added by increment 2: market depth and symbol search
+#
+# Both are pure reads. They build their own client the same way the quote
+# fallback above does, and neither can write anything at a broker.
+# ---------------------------------------------------------------------------
+
+def _read_credential():
+    """
+    One account to read shared market data through.
+
+    Depth and symbol search are not per account, so any connected account
+    answers them. Prefer the account the caller asked for, otherwise the first
+    one whose API key can be read.
+
+    Returns (credential_or_None, error_or_None).
+    """
+    raw = _arg('account')
+    accounts = _active_accounts()
+    if not accounts:
+        return None, 'No active trading account is configured'
+
+    if raw and raw.lower() != 'all':
+        try:
+            account_id = int(raw)
+        except (TypeError, ValueError):
+            return None, 'Invalid account filter'
+        accounts = [account for account in accounts if account.id == account_id]
+        if not accounts:
+            return None, 'Account not found'
+
+    creds = _account_credentials(accounts)
+    credential = _quote_credential(creds, {})
+    if credential is None:
+        return None, 'No account with a readable API key is available'
+    return credential, None
+
+
+def _depth_side(rows, side_total):
+    """
+    Five levels of one side of the book, padded so the panel always has five.
+
+    fill_pct is the level's share of the five level total on its own side,
+    which is what the proportion bar in the mockup draws.
+    """
+    levels = []
+    for index in range(DEPTH_LEVELS):
+        row = rows[index] if index < len(rows) else {}
+        if not isinstance(row, dict):
+            row = {}
+        quantity = _to_int(_first_number(row, _DEPTH_QTY_KEYS))
+        levels.append({
+            'level': index + 1,
+            'price': _money(row.get('price')),
+            'quantity': quantity,
+            'orders': _to_int(_first_number(row, _DEPTH_ORDERS_KEYS)),
+            'fill_pct': _pct(percent_of(quantity, side_total)),
+        })
+    return levels
+
+
+def _normalise_depth(data, symbol, exchange):
+    """
+    Turn an OpenAlgo depth payload into the Market Depth panel's shape.
+
+    Adapters spell the surrounding figures differently, so each one is resolved
+    from an alias list rather than a single key. A figure the broker does not
+    publish comes back as 0 and the panel shows a dash for it.
+    """
+    data = data if isinstance(data, dict) else {}
+
+    bids_raw = data.get('bids')
+    if not isinstance(bids_raw, list):
+        bids_raw = data.get('buy') if isinstance(data.get('buy'), list) else []
+    asks_raw = data.get('asks')
+    if not isinstance(asks_raw, list):
+        asks_raw = data.get('sell') if isinstance(data.get('sell'), list) else []
+
+    bids_raw = [row for row in bids_raw if isinstance(row, dict)][:DEPTH_LEVELS]
+    asks_raw = [row for row in asks_raw if isinstance(row, dict)][:DEPTH_LEVELS]
+
+    bid_total_5 = sum(_to_int(_first_number(row, _DEPTH_QTY_KEYS)) for row in bids_raw)
+    ask_total_5 = sum(_to_int(_first_number(row, _DEPTH_QTY_KEYS)) for row in asks_raw)
+
+    ltp = _to_float(data.get('ltp'))
+    prev_close = _first_number(data, _PREV_CLOSE_KEYS)
+    change = ltp - prev_close if ltp > 0 and prev_close > 0 else 0.0
+
+    total_buy = _to_int(_first_number(data, _TOTAL_BUY_KEYS)) or bid_total_5
+    total_sell = _to_int(_first_number(data, _TOTAL_SELL_KEYS)) or ask_total_5
+
+    return {
+        'symbol': symbol,
+        'exchange': exchange,
+        'bids': _depth_side(bids_raw, bid_total_5),
+        'asks': _depth_side(asks_raw, ask_total_5),
+        'totals': {
+            'bid_quantity': total_buy,
+            'ask_quantity': total_sell,
+            'bid_quantity_5': bid_total_5,
+            'ask_quantity_5': ask_total_5,
+        },
+        'ohlc': {
+            'open': _money(data.get('open')),
+            'high': _money(data.get('high')),
+            'low': _money(data.get('low')),
+            'close': _money(prev_close),
+        },
+        'ltp': _money(ltp),
+        'prev_close': _money(prev_close),
+        'change': _money(change),
+        'change_pct': _pct(signed_percent_of(change, prev_close)),
+        'volume': _to_int(_first_number(data, _VOLUME_KEYS)),
+        'ltq': _to_int(_first_number(data, _LTQ_KEYS)),
+        'ltt': data.get('ltt') or data.get('last_trade_time') or data.get('timestamp'),
+        'oi': _to_int(data.get('oi')),
+        'upper_circuit': _money(_first_number(data, _UPPER_CIRCUIT_KEYS)),
+        'lower_circuit': _money(_first_number(data, _LOWER_CIRCUIT_KEYS)),
+    }
+
+
+def _is_cash_instrument(entry):
+    """
+    True when a search result is a tradable NSE or BSE equity or ETF.
+
+    This module trades CNC delivery only, so a futures or options contract or
+    an index is never a valid result. Excluding the derivative shapes is safer
+    than allow-listing instrument type codes, which differ per adapter: a code
+    this function has never seen is still admitted as long as it is not marked
+    as a derivative and carries no expiry or strike.
+    """
+    exchange = str(entry.get('exchange') or '').strip().upper()
+    if exchange not in SEARCH_EXCHANGES:
+        return False
+
+    instrument = str(_first_text(entry, _INSTRUMENT_TYPE_KEYS) or '').upper()
+    if any(fragment in instrument for fragment in NON_EQUITY_INSTRUMENT_FRAGMENTS):
+        return False
+
+    if str(entry.get('expiry') or '').strip():
+        return False
+    if _to_float(entry.get('strike')) > 0:
+        return False
+    return True
+
+
+def _first_text(row, keys):
+    """Read the first key in keys that carries a non-empty string."""
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ''
+
+
+def _normalise_search_results(response):
+    """Extract the tradable cash instruments from an OpenAlgo search response."""
+    if not isinstance(response, dict) or response.get('status') != 'success':
+        return []
+
+    entries = response.get('data')
+    if not isinstance(entries, list):
+        entries = response.get('results')
+    if not isinstance(entries, list):
+        return []
+
+    seen = set()
+    results = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get('symbol') or '').strip().upper()
+        if not symbol:
+            continue
+        exchange = str(entry.get('exchange') or '').strip().upper()
+        if not _is_cash_instrument(entry):
+            continue
+        key = (symbol, exchange)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({
+            'symbol': symbol,
+            'exchange': exchange,
+            'name': _first_text(entry, _SEARCH_NAME_KEYS),
+            'token': str(entry.get('token') or '').strip(),
+            'instrument_type': str(_first_text(entry, _INSTRUMENT_TYPE_KEYS) or '').upper(),
+            'lot_size': _to_int(entry.get('lotsize') or entry.get('lot_size'), 1) or 1,
+            'tick_size': _to_float(entry.get('ticksize') or entry.get('tick_size')),
+        })
+        if len(results) >= MAX_SEARCH_RESULTS:
+            break
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Prices for one symbol
+# ---------------------------------------------------------------------------
+
+def _live_price(symbol, exchange):
+    """
+    Best available last traded price for one symbol.
+
+    Pushed feed first, the bounded REST fallback second, exactly like every
+    other price on these screens. Returns 0.0 when nothing answered, which the
+    engine reads as "the funds check could not be performed" rather than as a
+    price of zero.
+    """
+    try:
+        creds = _account_credentials(_active_accounts())
+        quotes, _feed = _resolve_prices(creds, {}, [(symbol, exchange)])
+    except Exception as exc:
+        current_app.logger.warning(
+            f'Equity live price unavailable for {symbol} {exchange}: {exc}'
+        )
+        return 0.0
+    return _to_float((quotes.get((symbol, exchange)) or {}).get('ltp'))
+
+
+# ---------------------------------------------------------------------------
+# M3 Watch List
+# ---------------------------------------------------------------------------
+
+def _watchlist_rows():
+    """This user's watch list, alphabetical."""
+    return EquityWatchlistItem.query.filter_by(
+        user_id=current_user.id
+    ).order_by(EquityWatchlistItem.symbol, EquityWatchlistItem.id).all()
+
+
+def _watchlist_item_payload(item, quote=None, nature_names=None):
+    """
+    One watch list row.
+
+    variance_pct is the PRD's Variance column: how far the live price is from
+    the target, as a signed percent of the target. signed_percent_of keeps the
+    sign, so a stock trading below its target reads as negative instead of
+    being clamped to zero.
+    """
+    quote = quote or {}
+    nature_names = nature_names or {}
+    ltp = _to_float(quote.get('ltp'))
+    prev_close = _to_float(quote.get('prev_close'))
+    target = _to_float(item.target_price)
+    change = ltp - prev_close if ltp > 0 and prev_close > 0 else 0.0
+    variance = ltp - target if ltp > 0 and target > 0 else 0.0
+
+    return {
+        'id': item.id,
+        'symbol': item.symbol,
+        'exchange': item.exchange,
+        'trade_nature_id': item.trade_nature_id,
+        'trade_nature': nature_names.get(item.trade_nature_id),
+        'target_price': _money(target) if item.target_price is not None else None,
+        'alert_price': (
+            _money(item.alert_price) if item.alert_price is not None else None
+        ),
+        'alert_direction': item.alert_direction,
+        'price_alert_enabled': bool(item.price_alert_enabled),
+        'alert_triggered_at': _iso(item.alert_triggered_at),
+        'alert_triggered_price': (
+            _money(item.alert_triggered_price)
+            if item.alert_triggered_price is not None else None
+        ),
+        'alert_armed': bool(
+            item.price_alert_enabled
+            and item.alert_price
+            and item.alert_triggered_at is None
+        ),
+        'ltp': _money(ltp),
+        'has_ltp': ltp > 0,
+        'prev_close': _money(prev_close),
+        'change': _money(change),
+        'change_pct': _pct(signed_percent_of(change, prev_close)),
+        'variance': _money(variance),
+        'variance_pct': _pct(signed_percent_of(variance, target)),
+        'has_variance': ltp > 0 and target > 0,
+        'created_at': _iso(item.created_at),
+        'updated_at': _iso(item.updated_at),
+    }
+
+
+def _clear_watchlist_alert(item):
+    """
+    Re-arm a watch list alert.
+
+    Every write that changes alert_price, alert_direction or
+    price_alert_enabled must call this, otherwise an alert that already fired
+    stays silent for good. See the EquityWatchlistItem docstring.
+    """
+    item.alert_triggered_at = None
+    item.alert_triggered_price = None
+
+
+def _evaluate_watchlist_alerts(items, quotes):
+    """
+    Fire the price alerts whose level has been crossed.
+
+    Two guards, both in the schema. alert_triggered_at is the de-duplication
+    guard: an alert fires only while it is NULL, and setting it is what marks
+    it delivered. alert_direction says which way the price has to cross, and is
+    resolved lazily from the first price actually seen when the admin did not
+    choose one, because an alert price on its own is ambiguous.
+
+    Note the difference from the stop loss monitor: this runs in the request
+    that polls the quotes, so a watch list alert needs the screen open. The
+    stop loss and target monitor, which is the one that can sell, deliberately
+    does not (PRD 8.3) and runs in the background scheduler instead.
+
+    Returns the list of alerts fired in this pass.
+    """
+    settings = _equity_settings()
+    if settings is not None and not settings.price_alerts_enabled:
+        return []
+
+    fired = []
+    changed = False
+
+    for item in items:
+        if not item.price_alert_enabled:
+            continue
+        alert_price = _to_float(item.alert_price)
+        if alert_price <= 0:
+            continue
+
+        quote = quotes.get((item.symbol, item.exchange)) or {}
+        ltp = _to_float(quote.get('ltp'))
+        if ltp <= 0:
+            continue
+
+        if not item.alert_direction:
+            # First price seen decides which side we started on. No alert is
+            # raised on this pass: an alert on the tick that defines the
+            # direction would fire on a level that was never actually crossed.
+            item.alert_direction = (
+                EQUITY_ALERT_DIRECTION_ABOVE if alert_price > ltp
+                else EQUITY_ALERT_DIRECTION_BELOW
+            )
+            changed = True
+            continue
+
+        if item.alert_triggered_at is not None:
+            continue
+
+        crossed = (
+            ltp >= alert_price
+            if item.alert_direction == EQUITY_ALERT_DIRECTION_ABOVE
+            else ltp <= alert_price
+        )
+        if not crossed:
+            continue
+
+        item.alert_triggered_at = datetime.utcnow()
+        item.alert_triggered_price = ltp
+        changed = True
+        fired.append({
+            'id': item.id,
+            'symbol': item.symbol,
+            'exchange': item.exchange,
+            'alert_price': _money(alert_price),
+            'alert_direction': item.alert_direction,
+            'ltp': _money(ltp),
+            'triggered_at': _iso(item.alert_triggered_at),
+            'message': (
+                f'{item.symbol} traded {"at or above" if item.alert_direction == EQUITY_ALERT_DIRECTION_ABOVE else "at or below"} '
+                f'{_money(alert_price)} (last {_money(ltp)})'
+            ),
+        })
+
+    if changed:
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            current_app.logger.warning(f'Could not record equity price alerts: {exc}')
+            return []
+
+    return fired
+
+
+def _build_watchlist_payload(with_prices=True):
+    """
+    M3 Watch List.
+
+    Prices come from the shared push feed, so the 10 second refresh the PRD
+    asks for costs no broker call once the feed is warm.
+    """
+    items = _watchlist_rows()
+    natures = _trade_natures()
+    nature_names = {nature.id: nature.name for nature in natures}
+
+    quotes = {}
+    price_feed = _feed_status_block({'requested': 0, 'from_feed': 0, 'from_rest': 0,
+                                     'fallback_symbols': 0})
+    alerts = []
+
+    if items and with_prices:
+        keys = [(item.symbol, item.exchange) for item in items]
+        creds = _account_credentials(_active_accounts())
+        quotes, price_feed = _resolve_prices(creds, {}, keys, want_prev_close=True)
+        alerts = _evaluate_watchlist_alerts(items, quotes)
+
+    settings = _equity_settings()
+    return {
+        'items': [
+            _watchlist_item_payload(item, quotes.get((item.symbol, item.exchange)), nature_names)
+            for item in items
+        ],
+        'alerts': alerts,
+        'trade_natures': [
+            {'id': nature.id, 'name': nature.name} for nature in natures
+        ],
+        'price_alerts_enabled': bool(settings.price_alerts_enabled) if settings else True,
+        'max_items': MAX_WATCHLIST_ITEMS,
+        'price_feed': price_feed,
+        'generated_at': _iso(datetime.utcnow()),
+    }
+
+
+def _build_trade_natures_payload():
+    """Settings: every trade nature, active and inactive, in display order."""
+    natures = _all_trade_natures()
+    return {
+        'trade_natures': [
+            {
+                'id': nature.id,
+                'name': nature.name,
+                'display_order': _to_int(nature.display_order),
+                'is_active': nature.is_active is not False,
+                'created_at': _iso(nature.created_at),
+                'updated_at': _iso(nature.updated_at),
+            }
+            for nature in natures
+        ],
+        'generated_at': _iso(datetime.utcnow()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# M4 Place Order
+#
+# The preview and the submit share one instruction reader, so what the admin is
+# shown in the split table and what is actually sent cannot drift apart.
+# ---------------------------------------------------------------------------
+
+def _read_instruction(data, require_accounts=True):
+    """
+    Read one equity instruction from a request body.
+
+    Product is never read from the request. Equity is CNC delivery, always, so
+    it is a constant here rather than something a caller can influence.
+    """
+    instruction = {
+        'symbol': _read_symbol(data),
+        'exchange': _read_exchange(data),
+        'side': _read_choice(data, 'side', VALID_SIDES),
+        'order_type': _read_choice(
+            data, 'order_type', VALID_ORDER_TYPES,
+            required=False, default=EQUITY_ORDER_TYPE_MARKET
+        ),
+        'total_quantity': _read_int(data, 'total_quantity', minimum=1, required=True),
+        'price': _read_price(data, 'price'),
+        'trigger_price': _read_price(data, 'trigger_price'),
+        'quantity_overrides': _read_quantity_overrides(data),
+        'account_ids': _read_account_ids(data) if require_accounts else None,
+        'reference_price': _read_price(data, 'reference_price'),
+        'insufficient_funds_action': _read_choice(
+            data, 'insufficient_funds_action', VALID_FUNDS_ACTIONS, required=False
+        ),
+        'product': EQUITY_PRODUCT_CNC,
+    }
+
+    if instruction['order_type'] == EQUITY_ORDER_TYPE_LIMIT and not instruction['price']:
+        raise _BadRequest('A LIMIT order needs a price')
+    if instruction['order_type'] == EQUITY_ORDER_TYPE_GTT:
+        if not instruction['price']:
+            raise _BadRequest('A GTT order needs a limit price')
+        if not instruction['trigger_price']:
+            raise _BadRequest('A GTT order needs a trigger price')
+
+    # A MARKET order has no price of its own, so Est. Value and the cash check
+    # need the live last traded price. Resolved here rather than trusted from
+    # the browser, which could send anything.
+    if (instruction['order_type'] == EQUITY_ORDER_TYPE_MARKET
+            and not instruction['reference_price']):
+        price = _live_price(instruction['symbol'], instruction['exchange'])
+        instruction['reference_price'] = price if price > 0 else None
+
+    return instruction
+
+
+def _annotate_sell_capacity(rows, tracked, symbol, exchange):
+    """
+    Add what each account can actually deliver to the split rows, and flag the
+    ones that cannot cover their share.
+
+    A CNC sell of shares the account does not hold is a short delivery, which
+    is an auction and a penalty rather than a trade, so an account with nothing
+    sellable is flagged rather than sent.
+    """
+    for row in rows:
+        holding = tracked.get(_holding_key(row['account_id'], symbol, exchange))
+        sellable = _to_int(holding.sellable_quantity) if holding is not None else 0
+        wanted = _to_int(row.get('quantity'))
+
+        row['holding_id'] = holding.id if holding is not None else None
+        row['holding_quantity'] = _to_int(holding.quantity) if holding is not None else 0
+        row['pledged_quantity'] = (
+            _to_int(holding.pledged_quantity) if holding is not None else 0
+        )
+        row['sellable_quantity'] = sellable
+        row['exit_status'] = holding.exit_status if holding is not None else None
+        row['sell_quantity'] = min(wanted, sellable) if wanted > 0 else 0
+
+        if not row['check_ok']:
+            continue
+
+        if holding is None or sellable <= 0:
+            row['check_ok'] = False
+            row['check_reason'] = (
+                f'This account holds no deliverable {symbol}. A CNC sell '
+                'without the shares would be a short delivery.'
+            )
+        elif holding.is_exit_in_flight:
+            row['check_ok'] = False
+            row['check_reason'] = (
+                'A sell against this holding is already in flight. It has to '
+                'settle before another one can be claimed.'
+            )
+        elif holding.exit_status == EQUITY_HOLDING_STATUS_EXIT_INDETERMINATE:
+            row['check_ok'] = False
+            row['check_reason'] = (
+                'The previous exit on this holding was never confirmed. Verify '
+                'it at the broker and resolve it before selling again.'
+            )
+        elif wanted > sellable:
+            row['check_ok'] = False
+            row['check_reason'] = (
+                f'This account holds {sellable} deliverable shares, short of '
+                f'the {wanted} its share of the order needs.'
+            )
+    return rows
+
+
+def _sell_context(instruction):
+    """
+    Prepare a SELL: refresh the tracked holdings the claim will lock.
+
+    The claim reads the quantity off the EquityHolding row, so that row has to
+    say what the broker says before anything is claimed. The read is served
+    from the 30 second cache when it is warm, so this normally costs nothing.
+
+    Returns (accounts_in_view, tracked_holdings).
+    """
+    wanted = set(instruction['account_ids'] or [])
+    context = _account_context(
+        fetch_holdings=True,
+        fetch_account_ids=sorted(wanted)
+    )
+    accounts = [account for account in context['accounts'] if account.id in wanted]
+    tracked = _sync_holding_rows(
+        accounts,
+        context['snapshots'],
+        symbol=instruction['symbol'],
+        exchange=instruction['exchange'],
+    )
+    return accounts, tracked
+
+
+def _build_order_preview(instruction):
+    """
+    The M4 ACCOUNT-WISE ORDER SPLIT table. Writes nothing, places nothing.
+
+    For a SELL the tracked holdings are refreshed first and every row is
+    annotated with the deliverable quantity, because for a sell the binding
+    constraint is stock rather than cash.
+    """
+    tracked = {}
+    if instruction['side'] == EQUITY_SIDE_SELL:
+        _accounts, tracked = _sell_context(instruction)
+
+    preview = preview_order_split(
+        user_id=current_user.id,
+        symbol=instruction['symbol'],
+        exchange=instruction['exchange'],
+        side=instruction['side'],
+        total_quantity=instruction['total_quantity'],
+        order_type=instruction['order_type'],
+        price=instruction['price'],
+        trigger_price=instruction['trigger_price'],
+        account_ids=instruction['account_ids'],
+        quantity_overrides=instruction['quantity_overrides'],
+        reference_price=instruction['reference_price'],
+        insufficient_funds_action=instruction['insufficient_funds_action'],
+    )
+    if preview.get('status') != 'success':
+        raise _BadRequest(preview.get('message') or 'The order split could not be worked out')
+
+    directory = _account_directory()
+    rows = preview['rows']
+    for row in rows:
+        account = directory.get(row['account_id']) or {}
+        row['broker_name'] = account.get('broker_name')
+        row['est_value'] = _money(row['est_value']) if row['est_value'] is not None else None
+        row['cash_balance'] = (
+            _money(row['cash_balance']) if row['cash_balance'] is not None else None
+        )
+        row['required_cash'] = (
+            _money(row['required_cash']) if row['required_cash'] is not None else None
+        )
+        row['qty_ratio'] = _pct(row['qty_ratio'])
+
+    if instruction['side'] == EQUITY_SIDE_SELL:
+        rows = _annotate_sell_capacity(
+            rows, tracked, instruction['symbol'], instruction['exchange']
+        )
+
+    flagged = [row for row in rows if not row['check_ok']]
+    preview['rows'] = rows
+    preview['accounts_ok'] = len(rows) - len(flagged)
+    preview['accounts_flagged'] = len(flagged)
+    preview['claim_backed'] = instruction['side'] == EQUITY_SIDE_SELL
+    preview['generated_at'] = _iso(datetime.utcnow())
+    return preview
+
+
+def _placement_response(instruction, message, status):
+    """The empty shell every placement answer is filled into."""
+    return {
+        'status': status,
+        'message': message,
+        'claim_backed': instruction['side'] == EQUITY_SIDE_SELL,
+        'order_id': None,
+        'order_ids': [],
+        'parent_status': None,
+        'symbol': instruction['symbol'],
+        'exchange': instruction['exchange'],
+        'side': instruction['side'],
+        'order_type': instruction['order_type'],
+        'product': EQUITY_PRODUCT_CNC,
+        'price': instruction['price'],
+        'trigger_price': instruction['trigger_price'],
+        'total_quantity': instruction['total_quantity'],
+        'placed_quantity': 0,
+        'leftover_quantity': 0,
+        'ratio_leftover': 0,
+        'insufficient_funds_action': instruction['insufficient_funds_action'],
+        'error_message': None,
+        'accounts_selected': 0,
+        'accounts_placed': 0,
+        'accounts_failed': 0,
+        'accounts_skipped': 0,
+        'accounts_indeterminate': 0,
+        'accounts_unsupported': 0,
+        'counts': {},
+        'splits': [],
+        'generated_at': _iso(datetime.utcnow()),
+    }
+
+
+def _place_buy(instruction, stop_loss, target, trade_nature_id, gtt_trigger_leg):
+    """
+    A BUY goes straight through the engine's multi-account placement.
+
+    There is nothing to claim: a buy cannot collide with the stop loss monitor,
+    which only ever sells.
+    """
+    result = place_multi_account_order(
+        user_id=current_user.id,
+        symbol=instruction['symbol'],
+        exchange=instruction['exchange'],
+        side=instruction['side'],
+        total_quantity=instruction['total_quantity'],
+        order_type=instruction['order_type'],
+        price=instruction['price'],
+        trigger_price=instruction['trigger_price'],
+        stop_loss=stop_loss,
+        target=target,
+        account_ids=instruction['account_ids'],
+        quantity_overrides=instruction['quantity_overrides'],
+        trade_nature_id=trade_nature_id,
+        source=EQUITY_ORDER_SOURCE_MANUAL,
+        reference_price=instruction['reference_price'],
+        insufficient_funds_action=instruction['insufficient_funds_action'],
+        gtt_trigger_leg=gtt_trigger_leg,
+    )
+
+    response = _placement_response(
+        instruction, result.get('message') or '', result.get('status') or 'error'
+    )
+    for key in (
+        'order_id', 'parent_status', 'placed_quantity', 'leftover_quantity',
+        'ratio_leftover', 'insufficient_funds_action', 'error_message',
+        'accounts_selected', 'accounts_placed', 'accounts_failed',
+        'accounts_skipped', 'accounts_indeterminate', 'accounts_unsupported',
+        'counts',
+    ):
+        if key in result:
+            response[key] = result[key]
+
+    order_id = result.get('order_id')
+    if order_id:
+        response['order_ids'] = [order_id]
+        order = _owned_order(order_id)
+        if order is not None:
+            directory = _account_directory()
+            response['splits'] = [
+                _split_payload(split, directory)
+                for split in order.splits.order_by(EquityOrderSplit.account_id).all()
+            ]
+    return response
+
+
+def _place_sell(instruction, gtt_trigger_leg):
+    """
+    A SELL is an exit, so every account goes through the claim.
+
+    The stop loss and target monitor runs in the background scheduler and can
+    decide to sell the same shares in the same second. Both paths therefore
+    meet at EquityHolding.claim_for_exit, which locks the row, re-checks it and
+    commits the claim BEFORE a broker is called. Losing that race is reported
+    as a skipped account, not as an error, and never as a second order.
+
+    One consequence worth knowing: the engine's claim helper creates one parent
+    order per account, because the claim belongs to one holding. A five account
+    sell therefore appears in the order book as five orders of one account
+    each, and order_ids carries all of them.
+    """
+    accounts, tracked = _sell_context(instruction)
+    if not accounts:
+        raise _BadRequest('Select at least one active account')
+
+    preview = preview_order_split(
+        user_id=current_user.id,
+        symbol=instruction['symbol'],
+        exchange=instruction['exchange'],
+        side=instruction['side'],
+        total_quantity=instruction['total_quantity'],
+        order_type=instruction['order_type'],
+        price=instruction['price'],
+        trigger_price=instruction['trigger_price'],
+        account_ids=instruction['account_ids'],
+        quantity_overrides=instruction['quantity_overrides'],
+        reference_price=instruction['reference_price'],
+    )
+    if preview.get('status') != 'success':
+        raise _BadRequest(preview.get('message') or 'The order split could not be worked out')
+
+    rows = _annotate_sell_capacity(
+        preview['rows'], tracked, instruction['symbol'], instruction['exchange']
+    )
+
+    # Honour the ABORT policy BEFORE anything is claimed or sent. The buy path
+    # already does this; without it here the sell path silently downgraded ABORT
+    # to SKIP while the confirmation dialog promised the opposite, which is the
+    # worst kind of disagreement between what a screen says and what it does.
+    if instruction['insufficient_funds_action'] == EQUITY_FUNDS_ACTION_ABORT:
+        blocked = [row for row in rows if not row.get('check_ok')]
+        if blocked:
+            names = ', '.join(
+                str(row.get('account_name') or row.get('account_id')) for row in blocked
+            )
+            raise _BadRequest(
+                'Nothing was placed. %d of %d accounts cannot sell this holding (%s), '
+                'and the insufficient funds policy for this order is ABORT. '
+                'Switch the policy to SKIP to place the remaining accounts.'
+                % (len(blocked), len(rows), names)
+            )
+
+    directory = _account_directory()
+    jobs = []
+    row_by_holding = {}
+    skipped_rows = []
+    for row in rows:
+        if not row['check_ok'] or not row.get('holding_id') or row['sell_quantity'] <= 0:
+            skipped_rows.append(row)
+            continue
+        jobs.append({'holding_id': row['holding_id'], 'quantity': row['sell_quantity']})
+        row_by_holding[row['holding_id']] = row
+
+    results = _fan_out_exits(
+        jobs,
+        reason=EQUITY_EXIT_REASON_MANUAL,
+        order_type=instruction['order_type'],
+        price=instruction['price'],
+        trigger_price=instruction['trigger_price'],
+        gtt_trigger_leg=gtt_trigger_leg,
+    )
+
+    counts = _exit_counts(results)
+    splits = []
+    order_ids = []
+    placed_quantity = 0
+
+    for result in results:
+        row = row_by_holding.get(result.get('holding_id')) or {}
+        if result.get('order_id'):
+            order_ids.append(result['order_id'])
+        if result.get('status') == 'success':
+            placed_quantity += _to_int(result.get('quantity'))
+
+        split = None
+        if result.get('split_id'):
+            # Scoped through the parent order's owner as well as the id, so
+            # this stays an owner-scoped query rather than an id lookup.
+            split = EquityOrderSplit.query.join(
+                EquityOrder, EquityOrderSplit.equity_order_id == EquityOrder.id
+            ).filter(
+                EquityOrderSplit.id == result['split_id'],
+                EquityOrder.user_id == current_user.id
+            ).first()
+        if split is not None:
+            payload = _split_payload(split, directory)
+        else:
+            payload = _skipped_split_payload(
+                row.get('account_id') or result.get('account_id'),
+                directory,
+                quantity=row.get('sell_quantity', 0),
+                ratio_quantity=row.get('ratio_quantity', 0),
+                qty_ratio=row.get('qty_ratio', 0.0),
+                est_value=row.get('est_value'),
+                reason=result.get('message'),
+                fill_status=(
+                    EQUITY_SPLIT_STATUS_SKIPPED if result.get('status') == 'skipped'
+                    else EQUITY_SPLIT_STATUS_FAILED
+                ),
+            )
+        payload['holding_id'] = result.get('holding_id')
+        payload['exit_status'] = result.get('status')
+        payload['exit_message'] = result.get('message')
+        # qty_ratio on a claim-backed split is 100, because the split really is
+        # the whole of its own single account parent order. plan_qty_ratio is
+        # the allocation ratio the split table showed before submit, so the
+        # screen can keep rendering the same Qty Ratio column.
+        payload['plan_qty_ratio'] = _pct(row.get('qty_ratio', 0.0))
+        payload['plan_ratio_quantity'] = _to_int(row.get('ratio_quantity', 0))
+        splits.append(payload)
+
+    for row in skipped_rows:
+        payload = _skipped_split_payload(
+            row['account_id'], directory,
+            quantity=0,
+            ratio_quantity=row.get('ratio_quantity', 0),
+            qty_ratio=row.get('qty_ratio', 0.0),
+            est_value=row.get('est_value'),
+            reason=row.get('check_reason') or 'Skipped before any order was sent',
+        )
+        payload['holding_id'] = row.get('holding_id')
+        payload['exit_status'] = 'skipped'
+        payload['exit_message'] = row.get('check_reason')
+        payload['plan_qty_ratio'] = _pct(row.get('qty_ratio', 0.0))
+        payload['plan_ratio_quantity'] = _to_int(row.get('ratio_quantity', 0))
+        splits.append(payload)
+
+    splits.sort(key=lambda row: row['account_id'] or 0)
+
+    selected = len(rows)
+    skipped_total = counts['accounts_skipped'] + len(skipped_rows)
+    if counts['accounts_placed'] == 0:
+        status = 'error'
+    elif counts['accounts_placed'] < selected:
+        status = 'partial'
+    else:
+        status = 'success'
+
+    parts = [f'{counts["accounts_placed"]} of {selected} accounts placed']
+    if counts['accounts_failed']:
+        parts.append(f'{counts["accounts_failed"]} failed')
+    if skipped_total:
+        parts.append(f'{skipped_total} skipped')
+    if counts['accounts_indeterminate']:
+        parts.append(
+            f'{counts["accounts_indeterminate"]} unconfirmed, verify at the broker'
+        )
+    if preview.get('leftover_quantity'):
+        parts.append(
+            f'{preview["leftover_quantity"]} shares left over after rounding down'
+        )
+
+    response = _placement_response(instruction, ', '.join(parts), status)
+    response['order_ids'] = order_ids
+    response['order_id'] = order_ids[0] if len(order_ids) == 1 else None
+    response['placed_quantity'] = placed_quantity
+    response['leftover_quantity'] = _to_int(preview.get('leftover_quantity'))
+    response['ratio_leftover'] = _to_int(preview.get('ratio_leftover'))
+    response['accounts_selected'] = selected
+    response['accounts_placed'] = counts['accounts_placed']
+    response['accounts_failed'] = counts['accounts_failed']
+    response['accounts_skipped'] = skipped_total
+    response['accounts_indeterminate'] = counts['accounts_indeterminate']
+    response['splits'] = splits
+    response['counts'] = {
+        'total': selected,
+        'placed': counts['accounts_placed'],
+        'failed': counts['accounts_failed'],
+        'skipped': skipped_total,
+        'indeterminate': counts['accounts_indeterminate'],
+    }
+    return response
+
+
+# ---------------------------------------------------------------------------
+# M4b Order Status, M5 Order Book, M6 Trade Book
+# ---------------------------------------------------------------------------
+
+def _order_window(query, carry_open_gtt=True, date_from=None, date_to=None):
+    """
+    Restrict an order query to the window the PRD asks for.
+
+    With no date filter the books show TODAY's orders, plus a GTT placed on an
+    earlier day that is still working. A resting GTT is an open instruction: it
+    has to stay reachable to be cancelled, which is exactly what would be lost
+    by a plain "placed today" filter.
+    """
+    if date_from is not None or date_to is not None:
+        if date_from is not None:
+            query = query.filter(
+                EquityOrder.placed_at >= datetime.combine(date_from, datetime.min.time())
+            )
+        if date_to is not None:
+            query = query.filter(
+                EquityOrder.placed_at <= datetime.combine(date_to, datetime.max.time())
+            )
+        return query
+
+    start = _today_start()
+    if not carry_open_gtt:
+        return query.filter(EquityOrder.placed_at >= start)
+
+    return query.filter(or_(
+        EquityOrder.placed_at >= start,
+        and_(
+            EquityOrder.order_type == EQUITY_ORDER_TYPE_GTT,
+            EquityOrder.status.in_(OPEN_ORDER_STATUSES),
+        ),
+    ))
+
+
+def _order_filters(query, account_id=None, symbol=None, side=None, status=None,
+                   order_type=None, source=None, nature_id=None):
+    """Apply the shared Order Book and Trade Book filters."""
+    if account_id is not None:
+        query = query.filter(
+            EquityOrder.splits.any(EquityOrderSplit.account_id == account_id)
+        )
+    if symbol:
+        query = query.filter(EquityOrder.symbol == symbol)
+    if side:
+        query = query.filter(EquityOrder.side == side)
+    if status:
+        query = query.filter(EquityOrder.status == status)
+    if order_type:
+        query = query.filter(EquityOrder.order_type == order_type)
+    if source:
+        query = query.filter(EquityOrder.source == source)
+    if nature_id is not None:
+        query = query.filter(EquityOrder.trade_nature_id == nature_id)
+    return query
+
+
+def _sort_by_prd_status(rows):
+    """
+    PRD M4b ordering: PENDING, then PARTIAL, then COMPLETED, then CANCELLED, so
+    open orders surface first. Python's sort is stable, so the newest-first
+    ordering inside each group is the one the query already produced.
+    """
+    rows.sort(key=lambda row: ORDER_STATUS_SORT_RANK.get(
+        row['status'], len(ORDER_STATUS_SORT_RANK)
+    ))
+    return rows
+
+
+def _filter_options():
+    """The filter dropdown contents every book screen needs."""
+    return {
+        'accounts': [
+            {
+                'account_id': account_id,
+                'account_name': entry['account_name'],
+                'broker_name': entry['broker_name'],
+                'is_active': entry['is_active'],
+            }
+            for account_id, entry in sorted(_account_directory().items())
+        ],
+        'trade_natures': [
+            {'id': nature.id, 'name': nature.name} for nature in _trade_natures()
+        ],
+        'sides': list(VALID_SIDES),
+        'statuses': list(VALID_ORDER_STATUSES),
+        'order_types': list(VALID_ORDER_TYPES),
+    }
+
+
+def _read_book_filters():
+    """
+    Read every Order Book and Trade Book filter from the query string.
+
+    Returns (filters_dict, error_or_None).
+    """
+    account_id, error = _filter_account_id()
+    if error:
+        return None, error
+
+    side, error = _arg_choice('side', VALID_SIDES, 'side')
+    if error:
+        return None, error
+
+    status, error = _arg_choice('status', VALID_ORDER_STATUSES, 'status')
+    if error:
+        return None, error
+
+    order_type, error = _arg_choice('order_type', VALID_ORDER_TYPES, 'order type')
+    if error:
+        return None, error
+
+    date_from, error = _arg_date('from')
+    if error:
+        return None, error
+
+    date_to, error = _arg_date('to')
+    if error:
+        return None, error
+
+    if date_from and date_to and date_from > date_to:
+        return None, 'The from date must not be after the to date'
+
+    nature_id, error = _selected_trade_nature_id()
+    if error:
+        return None, error
+
+    return {
+        'account_id': account_id,
+        'symbol': _arg_symbol(),
+        'side': side,
+        'status': status,
+        'order_type': order_type,
+        'trade_nature_id': nature_id,
+        'date_from': date_from,
+        'date_to': date_to,
+    }, None
+
+
+def _filters_echo(filters):
+    """The filters as the screen sent them, echoed back for the controls."""
+    return {
+        'account': filters['account_id'] if filters['account_id'] is not None else 'all',
+        'symbol': filters['symbol'] or '',
+        'side': filters['side'] or 'all',
+        'status': filters['status'] or 'all',
+        'order_type': filters['order_type'] or 'all',
+        'trade_nature': (
+            filters['trade_nature_id'] if filters['trade_nature_id'] is not None else 'all'
+        ),
+        'from': filters['date_from'].isoformat() if filters['date_from'] else '',
+        'to': filters['date_to'].isoformat() if filters['date_to'] else '',
+    }
+
+
+def _build_order_book(filters, carry_open_gtt=True, include_splits=False,
+                      sort_by_status=False):
+    """M5 Order Book, and the M4b Order Status list, which share one query."""
+    query = EquityOrder.query.filter(EquityOrder.user_id == current_user.id)
+    query = _order_filters(
+        query,
+        account_id=filters['account_id'],
+        symbol=filters['symbol'],
+        side=filters['side'],
+        status=filters['status'],
+        order_type=filters['order_type'],
+        nature_id=filters['trade_nature_id'],
+    )
+    query = _order_window(
+        query,
+        carry_open_gtt=carry_open_gtt,
+        date_from=filters['date_from'],
+        date_to=filters['date_to'],
+    )
+    orders = query.order_by(EquityOrder.placed_at.desc(), EquityOrder.id.desc()).all()
+
+    directory = _account_directory()
+    start = _today_start()
+    rows = []
+    carried = 0
+    for order in orders:
+        splits = order.splits.order_by(EquityOrderSplit.account_id).all()
+        if filters['account_id'] is not None:
+            # An account filtered view shows only that account's share, so the
+            # Accounts count stays honest instead of counting accounts the
+            # admin filtered out.
+            splits = [split for split in splits if split.account_id == filters['account_id']]
+        payload = _order_payload(order, splits, directory, include_splits=include_splits)
+        payload['is_carried_gtt'] = bool(
+            order.placed_at is not None and order.placed_at < start
+        )
+        if payload['is_carried_gtt']:
+            carried += 1
+        rows.append(payload)
+
+    if sort_by_status:
+        _sort_by_prd_status(rows)
+
+    return {
+        'orders': rows,
+        'totals': {
+            'orders': len(rows),
+            'quantity': sum(row['total_quantity'] for row in rows),
+            'filled_quantity': sum(row['filled_quantity'] for row in rows),
+            'open_orders': sum(1 for row in rows if row['is_open']),
+            'carried_gtt_orders': carried,
+        },
+        'filters': _filters_echo(filters),
+        'options': _filter_options(),
+        'window': {
+            'today_only': filters['date_from'] is None and filters['date_to'] is None,
+            'carries_open_gtt': carry_open_gtt,
+            'today': _iso(datetime.utcnow().date()),
+        },
+        'sort_order': list(VALID_ORDER_STATUSES) if sort_by_status else 'placed_at_desc',
+        'generated_at': _iso(datetime.utcnow()),
+    }
+
+
+def _build_trade_book(filters):
+    """
+    M6 Trade Book: every fill, with its execution price and its parent order.
+
+    Fills are written by the order status reconciliation, which is not part of
+    this increment, so this list is empty until that lands. The screen has to
+    render an empty state rather than assume rows.
+    """
+    query = db.session.query(EquityTrade, EquityOrderSplit, EquityOrder).join(
+        EquityOrderSplit, EquityTrade.split_id == EquityOrderSplit.id
+    ).join(
+        EquityOrder, EquityOrderSplit.equity_order_id == EquityOrder.id
+    ).filter(EquityOrder.user_id == current_user.id)
+
+    if filters['account_id'] is not None:
+        query = query.filter(EquityOrderSplit.account_id == filters['account_id'])
+    if filters['symbol']:
+        query = query.filter(EquityOrder.symbol == filters['symbol'])
+    if filters['side']:
+        query = query.filter(EquityOrder.side == filters['side'])
+    if filters['status']:
+        query = query.filter(EquityOrder.status == filters['status'])
+    if filters['order_type']:
+        query = query.filter(EquityOrder.order_type == filters['order_type'])
+    if filters['trade_nature_id'] is not None:
+        query = query.filter(EquityOrder.trade_nature_id == filters['trade_nature_id'])
+
+    if filters['date_from'] is not None:
+        query = query.filter(
+            EquityTrade.executed_at >= datetime.combine(
+                filters['date_from'], datetime.min.time()
+            )
+        )
+    if filters['date_to'] is not None:
+        query = query.filter(
+            EquityTrade.executed_at <= datetime.combine(
+                filters['date_to'], datetime.max.time()
+            )
+        )
+    if filters['date_from'] is None and filters['date_to'] is None:
+        query = query.filter(EquityTrade.executed_at >= _today_start())
+
+    records = query.order_by(
+        EquityTrade.executed_at.desc(), EquityTrade.id.desc()
+    ).all()
+
+    directory = _account_directory()
+    rows = [
+        _trade_payload(trade, split, order, directory)
+        for trade, split, order in records
+    ]
+
+    return {
+        'trades': rows,
+        'totals': {
+            'trades': len(rows),
+            'quantity': sum(row['executed_quantity'] for row in rows),
+            'value': _money(sum(row['trade_value'] for row in rows)),
+        },
+        'filters': _filters_echo(filters),
+        'options': _filter_options(),
+        'window': {
+            'today_only': filters['date_from'] is None and filters['date_to'] is None,
+            'today': _iso(datetime.utcnow().date()),
+        },
+        'generated_at': _iso(datetime.utcnow()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Equity preferences
+# ---------------------------------------------------------------------------
+
+def _build_preferences_payload():
+    """
+    Settings: the module wide switches, plus proof that the stop loss monitor
+    is actually running.
+
+    monitor_last_run_at is written by the background scheduler job, not by a
+    browser, so a recent heartbeat is what tells the admin the monitor is alive
+    with every tab closed.
+    """
+    settings = _equity_settings()
+
+    monitor = {'available': False}
+    try:
+        from app.utils.equity_exit_monitor import equity_exit_monitor
+        monitor = equity_exit_monitor.status()
+        monitor['available'] = True
+    except Exception as exc:
+        current_app.logger.debug(f'Equity exit monitor status unavailable: {exc}')
+
+    return {
+        'settings': {
+            'insufficient_funds_action': settings.insufficient_funds_action,
+            'default_exit_mode': settings.default_exit_mode,
+            'sl_monitor_enabled': bool(settings.sl_monitor_enabled),
+            'sl_monitor_interval_seconds': _to_int(settings.sl_monitor_interval_seconds),
+            'price_alerts_enabled': bool(settings.price_alerts_enabled),
+            'monitor_last_run_at': _iso(settings.monitor_last_run_at),
+            'monitor_last_error': settings.monitor_last_error,
+            'updated_at': _iso(settings.updated_at),
+        },
+        'monitor': monitor,
+        'options': {
+            'insufficient_funds_actions': list(VALID_FUNDS_ACTIONS),
+            'exit_modes': list(VALID_EXIT_MODES),
+            'monitor_interval_seconds': {
+                'minimum': MIN_MONITOR_INTERVAL_SECONDS,
+                'maximum': MAX_MONITOR_INTERVAL_SECONDS,
+            },
+        },
+        'exit_mode_tags': EXIT_MODE_TAGS,
+        'generated_at': _iso(datetime.utcnow()),
+    }
+
+
+def _json_route(view):
+    """
+    Standard JSON error handling for every increment 2 endpoint.
+
+    A _BadRequest is the caller's mistake and comes back as a 400 with the
+    message. Anything else is logged and comes back as a 500 envelope, so no
+    endpoint can hand a traceback to the browser and every failure has one
+    shape the frontend can read.
+
+    Every refusal rolls the session back first. A handler that validates its
+    entries one at a time can be part way through applying them when the next
+    one turns out to be invalid, and those half-applied changes must not
+    survive into whatever the request does next. A rollback cannot undo work
+    that already committed, so an order that reached a broker is unaffected.
+    """
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        def discard():
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+
+        try:
+            return view(*args, **kwargs)
+        except _BadRequest as exc:
+            discard()
+            return _json_error(str(exc))
+        except EquityOrderError as exc:
+            discard()
+            return _json_error(str(exc))
+        except Exception as exc:
+            discard()
+            current_app.logger.error(
+                f'Equity endpoint {request.endpoint} failed: {exc}'
+            )
+            return _json_error(f'Request failed: {exc}', 500)
+    return wrapper
+
+
+def _ok(payload, message=''):
+    """The success envelope every endpoint here returns."""
+    payload['status'] = 'success'
+    payload['message'] = message
+    return jsonify(payload)
+
+
+# ---------------------------------------------------------------------------
+# Page routes added by increment 2
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/watchlist')
+@login_required
+def watchlist():
+    """M3 Watch List. Data is loaded by the browser from /equity/api/watchlist."""
+    return render_template(
+        'equity/watchlist.html',
+        accounts=_active_accounts(),
+        trade_natures=_trade_natures()
+    )
+
+
+@equity_bp.route('/place-order')
+@login_required
+def place_order():
+    """M4 Place Order. The split table comes from /equity/api/order/preview."""
+    return render_template(
+        'equity/place_order.html',
+        accounts=_active_accounts(),
+        trade_natures=_trade_natures()
+    )
+
+
+@equity_bp.route('/order-book')
+@login_required
+def order_book():
+    """M5 Order Book."""
+    return render_template(
+        'equity/order_book.html',
+        accounts=_active_accounts(),
+        trade_natures=_trade_natures()
+    )
+
+
+@equity_bp.route('/trade-book')
+@login_required
+def trade_book():
+    """M6 Trade Book."""
+    return render_template(
+        'equity/trade_book.html',
+        accounts=_active_accounts(),
+        trade_natures=_trade_natures()
+    )
+
+
+# ---------------------------------------------------------------------------
+# M3 Watch List
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/watchlist')
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_watchlist():
+    """
+    The watch list with a live price on every row.
+
+    Prices come from the shared push feed, so a warm feed costs no broker call.
+    The REST quote fallback can run for a symbol that has not ticked yet, which
+    is why this is on the heavy limit.
+    """
+    return _ok(_build_watchlist_payload())
+
+
+@equity_bp.route('/api/watchlist/quotes')
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_watchlist_quotes():
+    """
+    The 10 second price refresh for the watch list rows.
+
+    Returns the same row shape as /equity/api/watchlist so the screen can
+    replace rows in place, plus any price alerts that fired on this pass.
+    """
+    return _ok(_build_watchlist_payload())
+
+
+@equity_bp.route('/api/watchlist', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_add_watchlist_item():
+    """
+    Add a stock to the watch list.
+
+    Request body:
+        {"symbol": "RELIANCE", "exchange": "NSE", "trade_nature_id": 1,
+         "target_price": 1450.0, "alert_price": 1400.0,
+         "alert_direction": "BELOW", "price_alert_enabled": true}
+
+    alert_direction is optional. Left out, it is resolved from the first live
+    price the row sees, because an alert price on its own does not say which
+    way the price has to cross it.
+    """
+    data = _body()
+    symbol = _read_symbol(data)
+    exchange = _read_exchange(data)
+    nature_id = _read_trade_nature_id(data)
+    target_price = _read_price(data, 'target_price')
+    alert_price = _read_price(data, 'alert_price')
+    direction = _read_choice(
+        data, 'alert_direction', VALID_ALERT_DIRECTIONS, required=False
+    )
+    enabled = _read_bool(data, 'price_alert_enabled', default=alert_price is not None)
+
+    if enabled and alert_price is None:
+        raise _BadRequest('A price alert needs an alert price')
+
+    existing = EquityWatchlistItem.query.filter_by(
+        user_id=current_user.id, symbol=symbol, exchange=exchange
+    ).first()
+    if existing is not None:
+        raise _BadRequest(f'{symbol} is already on the watch list')
+
+    count = EquityWatchlistItem.query.filter_by(user_id=current_user.id).count()
+    if count >= MAX_WATCHLIST_ITEMS:
+        raise _BadRequest(
+            f'The watch list holds at most {MAX_WATCHLIST_ITEMS} stocks. '
+            'Remove one before adding another.'
+        )
+
+    item = EquityWatchlistItem(
+        user_id=current_user.id,
+        symbol=symbol,
+        exchange=exchange,
+        trade_nature_id=nature_id,
+        target_price=target_price,
+        alert_price=alert_price,
+        alert_direction=direction if alert_price is not None else None,
+        price_alert_enabled=bool(enabled),
+    )
+    db.session.add(item)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        raise _BadRequest(f'{symbol} is already on the watch list')
+
+    _log_activity('equity_watchlist_added', {
+        'symbol': symbol, 'exchange': exchange, 'item_id': item.id
+    })
+
+    payload = _build_watchlist_payload()
+    payload['item_id'] = item.id
+    return _ok(payload, f'{symbol} added to the watch list')
+
+
+@equity_bp.route('/api/watchlist/<int:item_id>', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_update_watchlist_item(item_id):
+    """
+    Update one watch list row: trade nature, target price and the price alert.
+
+    Only the keys present in the body are changed. A key sent as null clears
+    that field, so target_price: null removes the target while leaving the
+    alert alone.
+
+    Any change to alert_price, alert_direction or price_alert_enabled re-arms
+    the alert, otherwise an alert that already fired would stay silent for
+    good.
+
+    Request body (all optional):
+        {"trade_nature_id": 2, "target_price": 1500, "alert_price": 1400,
+         "alert_direction": "BELOW", "price_alert_enabled": true,
+         "rearm_alert": true}
+    """
+    item = _owned_watchlist_item(item_id)
+    if item is None:
+        return _json_error('Watch list item not found', 404)
+
+    data = _body()
+    alert_changed = bool(_read_bool(data, 'rearm_alert', default=False))
+
+    if 'trade_nature_id' in data:
+        item.trade_nature_id = _read_trade_nature_id(data)
+
+    if 'target_price' in data:
+        item.target_price = _read_price(data, 'target_price')
+
+    if 'alert_price' in data:
+        item.alert_price = _read_price(data, 'alert_price')
+        alert_changed = True
+        if item.alert_price is None:
+            item.alert_direction = None
+            item.price_alert_enabled = False
+
+    if 'alert_direction' in data:
+        item.alert_direction = _read_choice(
+            data, 'alert_direction', VALID_ALERT_DIRECTIONS, required=False
+        )
+        alert_changed = True
+
+    if 'price_alert_enabled' in data:
+        enabled = _read_bool(data, 'price_alert_enabled', default=False)
+        if enabled and item.alert_price is None:
+            raise _BadRequest('A price alert needs an alert price')
+        item.price_alert_enabled = bool(enabled)
+        alert_changed = True
+
+    if alert_changed:
+        _clear_watchlist_alert(item)
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error(f'Equity watch list update failed: {exc}')
+        return _json_error(f'Failed to update the watch list row: {exc}', 500)
+
+    _log_activity('equity_watchlist_updated', {
+        'item_id': item.id, 'symbol': item.symbol, 'alert_rearmed': alert_changed
+    })
+
+    payload = _build_watchlist_payload()
+    payload['item_id'] = item.id
+    return _ok(payload, f'{item.symbol} updated')
+
+
+@equity_bp.route('/api/watchlist/<int:item_id>', methods=['DELETE'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_delete_watchlist_item(item_id):
+    """Remove one stock from the watch list."""
+    item = _owned_watchlist_item(item_id)
+    if item is None:
+        return _json_error('Watch list item not found', 404)
+
+    symbol = item.symbol
+    db.session.delete(item)
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error(f'Equity watch list delete failed: {exc}')
+        return _json_error(f'Failed to remove the watch list row: {exc}', 500)
+
+    _log_activity('equity_watchlist_removed', {'item_id': item_id, 'symbol': symbol})
+
+    payload = _build_watchlist_payload()
+    return _ok(payload, f'{symbol} removed from the watch list')
+
+
+# ---------------------------------------------------------------------------
+# Trade natures. Admin configurable, the four seeded values are only seeds.
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/trade-natures')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_trade_natures():
+    """Every trade nature, active and inactive, in display order."""
+    return _ok(_build_trade_natures_payload())
+
+
+@equity_bp.route('/api/trade-natures', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_create_trade_nature():
+    """
+    Create a trade nature.
+
+    Request body: {"name": "Positional"}
+    """
+    data = _body()
+    name = _read_text(data, 'name', maximum=50)
+
+    existing = EquityTradeNature.query.filter_by(
+        user_id=current_user.id, name=name
+    ).first()
+    if existing is not None:
+        raise _BadRequest(f'A trade nature named {name} already exists')
+
+    highest = db.session.query(
+        db.func.max(EquityTradeNature.display_order)
+    ).filter_by(user_id=current_user.id).scalar()
+
+    nature = EquityTradeNature(
+        user_id=current_user.id,
+        name=name,
+        display_order=_to_int(highest) + 1,
+        is_active=True,
+    )
+    db.session.add(nature)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        raise _BadRequest(f'A trade nature named {name} already exists')
+
+    _log_activity('equity_trade_nature_created', {'id': nature.id, 'name': name})
+
+    payload = _build_trade_natures_payload()
+    payload['trade_nature_id'] = nature.id
+    return _ok(payload, f'Trade nature {name} created')
+
+
+@equity_bp.route('/api/trade-natures/<int:nature_id>', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_update_trade_nature(nature_id):
+    """
+    Rename a trade nature, or activate and deactivate it.
+
+    Request body (both optional): {"name": "Swing Trade", "is_active": false}
+
+    A nature is never hard deleted: watch list rows, orders and holdings point
+    at it, and removing it would break their history. Deactivating takes it out
+    of the dropdowns and leaves every past reference intact.
+    """
+    nature = _owned_trade_nature(nature_id)
+    if nature is None:
+        return _json_error('Trade nature not found', 404)
+
+    data = _body()
+    changes = {}
+
+    if 'name' in data:
+        name = _read_text(data, 'name', maximum=50)
+        if name != nature.name:
+            clash = EquityTradeNature.query.filter(
+                EquityTradeNature.user_id == current_user.id,
+                EquityTradeNature.name == name,
+                EquityTradeNature.id != nature.id
+            ).first()
+            if clash is not None:
+                raise _BadRequest(f'A trade nature named {name} already exists')
+            changes['name'] = {'from': nature.name, 'to': name}
+            nature.name = name
+
+    if 'is_active' in data:
+        is_active = _read_bool(data, 'is_active', default=True)
+        if bool(nature.is_active) != bool(is_active):
+            changes['is_active'] = {'from': bool(nature.is_active), 'to': bool(is_active)}
+            nature.is_active = bool(is_active)
+
+    if 'display_order' in data:
+        nature.display_order = _read_int(data, 'display_order', minimum=0, default=0)
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        raise _BadRequest('A trade nature with that name already exists')
+
+    if changes:
+        _log_activity('equity_trade_nature_updated', {'id': nature.id, 'changes': changes})
+
+    return _ok(_build_trade_natures_payload(), f'Trade nature {nature.name} saved')
+
+
+@equity_bp.route('/api/trade-natures/<int:nature_id>', methods=['DELETE'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_deactivate_trade_nature(nature_id):
+    """
+    Deactivate a trade nature.
+
+    DELETE is a deactivation, not a removal, for the reason in the update
+    endpoint: existing rows point at this nature and their history has to stay
+    readable. Send is_active true through the update endpoint to bring it back.
+    """
+    nature = _owned_trade_nature(nature_id)
+    if nature is None:
+        return _json_error('Trade nature not found', 404)
+
+    nature.is_active = False
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error(f'Equity trade nature deactivate failed: {exc}')
+        return _json_error(f'Failed to deactivate the trade nature: {exc}', 500)
+
+    _log_activity('equity_trade_nature_deactivated', {
+        'id': nature.id, 'name': nature.name
+    })
+    return _ok(
+        _build_trade_natures_payload(),
+        f'Trade nature {nature.name} deactivated. Existing rows keep it.'
+    )
+
+
+@equity_bp.route('/api/trade-natures/reorder', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_reorder_trade_natures():
+    """
+    Set the order the trade natures appear in.
+
+    Request body: {"order": [3, 1, 2]}
+
+    Any nature not in the list keeps its place after the ones that are, so a
+    partial list cannot silently drop a nature out of the ordering.
+    """
+    data = _body()
+    raw = data.get('order')
+    if not isinstance(raw, list) or not raw:
+        raise _BadRequest('order must be a list of trade nature ids')
+
+    wanted = []
+    for value in raw:
+        try:
+            nature_id = int(value)
+        except (TypeError, ValueError):
+            raise _BadRequest('Invalid trade nature id in order')
+        if nature_id not in wanted:
+            wanted.append(nature_id)
+
+    natures = {nature.id: nature for nature in _all_trade_natures()}
+    unknown = [str(nature_id) for nature_id in wanted if nature_id not in natures]
+    if unknown:
+        raise _BadRequest(f'Trade nature {", ".join(unknown)} not found')
+
+    position = 1
+    for nature_id in wanted:
+        natures[nature_id].display_order = position
+        position += 1
+    for nature_id, nature in sorted(natures.items()):
+        if nature_id in wanted:
+            continue
+        nature.display_order = position
+        position += 1
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error(f'Equity trade nature reorder failed: {exc}')
+        return _json_error(f'Failed to reorder the trade natures: {exc}', 500)
+
+    _log_activity('equity_trade_natures_reordered', {'order': wanted})
+    return _ok(_build_trade_natures_payload(), 'Trade nature order saved')
+
+
+# ---------------------------------------------------------------------------
+# Shared market data: symbol search and market depth. Broker READS only.
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/symbol-search')
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_symbol_search():
+    """
+    Search NSE and BSE for an equity or an ETF.
+
+    Query string:
+        q         the search text, at least two characters. Required.
+        exchange  NSE or BSE to narrow the search. Optional.
+        account   read the search through this account. Optional, any
+                  connected account answers it.
+
+    Derivatives and indices are filtered out: this module trades CNC delivery,
+    so a futures or options contract is never a valid answer.
+
+    Response: {"status", "message", "query", "exchange", "results": [
+        {"symbol", "exchange", "name", "token", "instrument_type",
+         "lot_size", "tick_size"}], "count"}
+    """
+    query = _arg('q') or _arg('query')
+    if len(query) < 2:
+        raise _BadRequest('Enter at least two characters to search')
+    if len(query) > 50:
+        raise _BadRequest('The search text must be 50 characters or fewer')
+
+    exchange = _arg('exchange').upper()
+    if exchange and exchange not in SEARCH_EXCHANGES:
+        raise _BadRequest(f'exchange must be one of {", ".join(SEARCH_EXCHANGES)}')
+
+    credential, error = _read_credential()
+    if error:
+        return _json_error(error, 404 if error == 'Account not found' else 400)
+
+    try:
+        client = ExtendedOpenAlgoAPI(
+            api_key=credential['api_key'],
+            host=credential['host_url'],
+            timeout=BROKER_TIMEOUT_SECONDS
+        )
+        response = client.search(query=query, exchange=exchange or None)
+    except Exception as exc:
+        current_app.logger.warning(f'Equity symbol search failed: {exc}')
+        return _json_error(f'Symbol search is unavailable: {exc}', 502)
+
+    if not isinstance(response, dict) or response.get('status') != 'success':
+        message = (response or {}).get('message') or 'Symbol search returned no result'
+        return _json_error(message, 502)
+
+    results = _normalise_search_results(response)
+    return _ok({
+        'query': query,
+        'exchange': exchange or 'all',
+        'results': results,
+        'count': len(results),
+        'generated_at': _iso(datetime.utcnow()),
+    })
+
+
+@equity_bp.route('/api/depth')
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_depth():
+    """
+    Five level market depth for one symbol, for the Place Order Depth panel.
+
+    Query string:
+        symbol    required
+        exchange  defaults to NSE
+        account   read the depth through this account. Optional.
+
+    Response: {"status", "message", "depth": {
+        "symbol", "exchange",
+        "bids": [{"level", "price", "quantity", "orders", "fill_pct"} x5],
+        "asks": [ ... x5 ],
+        "totals": {"bid_quantity", "ask_quantity", "bid_quantity_5",
+                   "ask_quantity_5"},
+        "ohlc": {"open", "high", "low", "close"},
+        "ltp", "prev_close", "change", "change_pct", "volume", "ltq", "ltt",
+        "oi", "upper_circuit", "lower_circuit"}}
+    """
+    symbol = _arg('symbol').upper()
+    if not symbol:
+        raise _BadRequest('symbol is required')
+    exchange = (_arg('exchange') or 'NSE').upper()
+
+    credential, error = _read_credential()
+    if error:
+        return _json_error(error, 404 if error == 'Account not found' else 400)
+
+    try:
+        client = ExtendedOpenAlgoAPI(
+            api_key=credential['api_key'],
+            host=credential['host_url'],
+            timeout=BROKER_TIMEOUT_SECONDS
+        )
+        response = client.depth(symbol=symbol, exchange=exchange)
+    except Exception as exc:
+        current_app.logger.warning(f'Equity depth read failed for {symbol}: {exc}')
+        return _json_error(f'Market depth is unavailable: {exc}', 502)
+
+    if not isinstance(response, dict) or response.get('status') != 'success':
+        message = (response or {}).get('message') or 'Market depth returned no result'
+        return _json_error(message, 502)
+
+    return _ok({
+        'depth': _normalise_depth(response.get('data'), symbol, exchange),
+        'account_id': credential.get('account_id'),
+        'generated_at': _iso(datetime.utcnow()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# M4 Place Order
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/order/preview', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_order_preview():
+    """
+    The ACCOUNT-WISE ORDER SPLIT table. Places NOTHING and writes no order.
+
+    Request body:
+        {"symbol": "RELIANCE", "exchange": "NSE", "side": "BUY",
+         "order_type": "MARKET", "total_quantity": 100,
+         "price": null, "trigger_price": null,
+         "account_ids": [1, 2, 3],
+         "quantity_overrides": {"2": 15},
+         "reference_price": null,
+         "insufficient_funds_action": "SKIP"}
+
+    reference_price is only a hint. Left out on a MARKET order the live last
+    traded price is resolved here, because Est. Value and the cash check need a
+    price and the browser is not trusted to supply one.
+
+    Response:
+        {"status", "message", "symbol", "exchange", "side", "order_type",
+         "product", "price", "trigger_price", "total_quantity",
+         "rows": [...], "leftover_quantity", "ratio_leftover",
+         "allocated_quantity", "reference_price", "total_est_value",
+         "accounts_selected", "accounts_ok", "accounts_flagged",
+         "insufficient_funds_action", "claim_backed", "generated_at"}
+
+    Each row:
+        {"account_id", "account_name", "broker_name", "qty_ratio",
+         "ratio_quantity", "quantity", "qty_overridden", "est_value",
+         "cash_balance", "funds_checked", "required_cash",
+         "check_ok", "check_reason"}
+    and for a SELL, additionally:
+        {"holding_id", "holding_quantity", "pledged_quantity",
+         "sellable_quantity", "sell_quantity", "exit_status"}
+    """
+    instruction = _read_instruction(_body())
+    return _ok(_build_order_preview(instruction))
+
+
+@equity_bp.route('/api/order/place', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_place_order():
+    """
+    Place one equity instruction across the ticked accounts, simultaneously.
+
+    Request body: everything /equity/api/order/preview takes, plus
+        {"stop_loss": 1350, "target": 1600, "trade_nature_id": 1,
+         "gtt_trigger_leg": "SL"}
+
+    HOW A SELL DIFFERS. A sell against a tracked holding is an exit, and the
+    background stop loss monitor can decide to sell the same shares in the same
+    second. Every SELL therefore goes through the engine's claim-and-place
+    helper, which locks the holding row, commits the claim and only then calls
+    the broker. Two consequences the screen has to know about:
+        claim_backed is true, and the engine creates one parent order per
+            account, so order_ids carries one id per account that placed and
+            order_id is null unless exactly one account placed.
+        an account with nothing deliverable is SKIPPED with a reason rather
+            than sent, because a CNC sell without the shares is a short
+            delivery.
+    A BUY has nothing to claim and goes straight through multi-account
+    placement as one parent order.
+
+    Product is always CNC. stop_loss and target are AlgoMirror's own levels,
+    recorded on the order for the monitor and never sent to the broker. They
+    are ignored on a SELL, which is itself an exit.
+
+    Response:
+        {"status": "success" | "partial" | "error", "message",
+         "claim_backed", "order_id", "order_ids", "parent_status",
+         "symbol", "exchange", "side", "order_type", "product",
+         "price", "trigger_price", "total_quantity", "placed_quantity",
+         "leftover_quantity", "ratio_leftover", "insufficient_funds_action",
+         "error_message",
+         "accounts_selected", "accounts_placed", "accounts_failed",
+         "accounts_skipped", "accounts_indeterminate", "accounts_unsupported",
+         "counts", "splits": [...], "generated_at"}
+
+    Each split carries the keys documented on
+    /equity/api/orders/<order_id>/splits, and on a claim-backed sell also
+    holding_id, exit_status and exit_message.
+
+    status is 'partial' when some accounts placed and some did not. That is a
+    normal outcome, not a failure: the accounts that placed keep their orders.
+    """
+    data = _body()
+    instruction = _read_instruction(data)
+    gtt_trigger_leg = _read_choice(
+        data, 'gtt_trigger_leg', ('SL', 'TG'), required=False
+    )
+
+    if instruction['side'] == EQUITY_SIDE_SELL:
+        response = _place_sell(instruction, gtt_trigger_leg)
+    else:
+        response = _place_buy(
+            instruction,
+            stop_loss=_read_price(data, 'stop_loss'),
+            target=_read_price(data, 'target'),
+            trade_nature_id=_read_trade_nature_id(data),
+            gtt_trigger_leg=gtt_trigger_leg,
+        )
+
+    _log_activity('equity_order_placed', {
+        'symbol': instruction['symbol'],
+        'exchange': instruction['exchange'],
+        'side': instruction['side'],
+        'order_type': instruction['order_type'],
+        'total_quantity': instruction['total_quantity'],
+        'claim_backed': response['claim_backed'],
+        'order_ids': response['order_ids'],
+        'accounts_placed': response['accounts_placed'],
+        'accounts_selected': response['accounts_selected'],
+        'result': response['status'],
+    })
+
+    # A partial fan-out is reported as HTTP 200 with status 'partial'. The
+    # orders that were placed are real, and an error status code would invite
+    # the browser to retry an instruction that is already at the broker.
+    return jsonify(response)
+
+
+# ---------------------------------------------------------------------------
+# M4b Order Status
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/orders/status')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_order_status():
+    """
+    Today's orders for the Order Status panel, open ones first.
+
+    Sorted PENDING, then PARTIAL, then COMPLETED, then CANCELLED, newest first
+    inside each group. A GTT placed on an earlier day that is still working is
+    included, because a resting instruction has to stay reachable to be
+    cancelled.
+
+    Query string: the same filters as /equity/api/order-book, all optional.
+
+    Response: the /equity/api/order-book shape, with splits included on every
+    row so the View Split panel needs no second call.
+    """
+    filters, error = _read_book_filters()
+    if error:
+        return _json_error(error, 404 if 'not found' in error else 400)
+
+    payload = _build_order_book(
+        filters, carry_open_gtt=True, include_splits=True, sort_by_status=True
+    )
+    return _ok(payload)
+
+
+@equity_bp.route('/api/orders/<int:order_id>')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_order_detail(order_id):
+    """One order with its per-account splits."""
+    order = _owned_order(order_id)
+    if order is None:
+        return _json_error('Order not found', 404)
+
+    directory = _account_directory()
+    splits = order.splits.order_by(EquityOrderSplit.account_id).all()
+    return _ok({
+        'order': _order_payload(order, splits, directory, include_splits=True),
+        'generated_at': _iso(datetime.utcnow()),
+    })
+
+
+@equity_bp.route('/api/orders/<int:order_id>/splits')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_order_splits(order_id):
+    """
+    View Split: the per-account breakdown of one order.
+
+    Response: {"status", "message", "order": {...}, "splits": [...],
+               "leftover_quantity", "generated_at"}
+
+    Each split:
+        {"split_id", "order_id", "account_id", "account_name", "broker_name",
+         "qty_ratio", "ratio_quantity", "quantity", "qty_overridden",
+         "est_value", "cash_balance", "fill_status", "filled_quantity",
+         "avg_fill_price", "broker_order_id", "broker_gtt_id",
+         "broker_order_status", "error_message", "error_type",
+         "attempt_count", "placed_at", "last_synced_at",
+         "is_open", "is_terminal", "is_safe_to_retry"}
+
+    qty_ratio_at_order and cash_balance_at_order are point-in-time snapshots
+    taken when the order was created and are never recalculated (PRD 9.1).
+    """
+    order = _owned_order(order_id)
+    if order is None:
+        return _json_error('Order not found', 404)
+
+    directory = _account_directory()
+    splits = order.splits.order_by(EquityOrderSplit.account_id).all()
+    return _ok({
+        'order': _order_payload(order, splits, directory),
+        'splits': [_split_payload(split, directory) for split in splits],
+        'leftover_quantity': _to_int(order.leftover_quantity),
+        'generated_at': _iso(datetime.utcnow()),
+    })
+
+
+@equity_bp.route('/api/orders/<int:order_id>/modify', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_modify_order(order_id):
+    """
+    Modify an order that is still PENDING or PARTIAL, account by account.
+
+    Request body (all optional):
+        {"price": 1425.5, "trigger_price": 1400, "total_quantity": 120,
+         "quantity_overrides": {"2": 30}, "account_ids": [1, 2]}
+
+    A new total quantity is re-split on the ratio ALREADY RECORDED against each
+    split, never on today's allocations: the snapshot is point in time and a
+    modify does not rewrite history.
+
+    Response: {"status": "success" | "partial" | "error", "message",
+               "order_id", "parent_status", "accounts_total", "accounts_ok",
+               "accounts_failed", "accounts_indeterminate",
+               "results": [{"account_id", "ok", "indeterminate",
+                            "unsupported", "error_message", "error_type",
+                            "action"}],
+               "order": {...}, "splits": [...]}
+    """
+    order = _owned_order(order_id)
+    if order is None:
+        return _json_error('Order not found', 404)
+    if not order.is_open:
+        raise _BadRequest(
+            f'This order is {order.status} and can no longer be modified. '
+            'Only a PENDING or PARTIAL order can be changed.'
+        )
+
+    data = _body()
+    result = modify_order(
+        user_id=current_user.id,
+        order_id=order_id,
+        price=_read_price(data, 'price'),
+        trigger_price=_read_price(data, 'trigger_price'),
+        total_quantity=_read_int(data, 'total_quantity', minimum=1),
+        quantity_overrides=_read_quantity_overrides(data),
+        account_ids=data.get('account_ids') or None,
+    )
+
+    _log_activity('equity_order_modified', {
+        'order_id': order_id,
+        'result': result.get('status'),
+        'accounts_ok': result.get('accounts_ok'),
+    })
+
+    order = _owned_order(order_id)
+    if order is not None:
+        directory = _account_directory()
+        splits = order.splits.order_by(EquityOrderSplit.account_id).all()
+        result['order'] = _order_payload(order, splits, directory)
+        result['splits'] = [_split_payload(split, directory) for split in splits]
+    return jsonify(result)
+
+
+@equity_bp.route('/api/orders/<int:order_id>/cancel', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_cancel_order(order_id):
+    """
+    Cancel an order that is still PENDING or PARTIAL, account by account.
+
+    Request body (optional): {"account_ids": [1, 2]} to cancel only those
+    accounts. Left out, every account still working is cancelled.
+
+    A split is marked CANCELLED only on an explicit broker confirmation. A
+    cancel whose answer never arrived leaves the split as it was with the
+    reason recorded: we do not know whether that order is still live, and
+    guessing either way loses it.
+
+    Response: the /equity/api/orders/<order_id>/modify shape, with action
+    'cancel' on each result.
+    """
+    order = _owned_order(order_id)
+    if order is None:
+        return _json_error('Order not found', 404)
+    if not order.is_open:
+        raise _BadRequest(
+            f'This order is {order.status} and can no longer be cancelled. '
+            'Only a PENDING or PARTIAL order can be cancelled.'
+        )
+
+    data = _body()
+    result = cancel_order(
+        user_id=current_user.id,
+        order_id=order_id,
+        account_ids=data.get('account_ids') or None,
+    )
+
+    _log_activity('equity_order_cancelled', {
+        'order_id': order_id,
+        'result': result.get('status'),
+        'accounts_ok': result.get('accounts_ok'),
+    })
+
+    order = _owned_order(order_id)
+    if order is not None:
+        directory = _account_directory()
+        splits = order.splits.order_by(EquityOrderSplit.account_id).all()
+        result['order'] = _order_payload(order, splits, directory)
+        result['splits'] = [_split_payload(split, directory) for split in splits]
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# M5 Order Book and M6 Trade Book
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/order-book')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_order_book():
+    """
+    M5 Order Book.
+
+    Query string, all optional:
+        account       account id, or 'all'
+        symbol        exact symbol
+        side          BUY or SELL
+        status        PENDING, PARTIAL, COMPLETED or CANCELLED
+        order_type    MARKET, LIMIT or GTT
+        trade_nature  trade nature id, or 'all'
+        from, to      YYYY-MM-DD
+
+    With no date filter the book shows TODAY's orders, plus a GTT placed on an
+    earlier day that is still pending. Sending from or to switches to that
+    window exactly, with no GTT carry-over, because an explicit range is an
+    explicit question.
+
+    Response:
+        {"status", "message",
+         "orders": [ ... one per order, see below ... ],
+         "totals": {"orders", "quantity", "filled_quantity", "open_orders",
+                    "carried_gtt_orders"},
+         "filters": {...echoed...},
+         "options": {"accounts", "trade_natures", "sides", "statuses",
+                     "order_types"},
+         "window": {"today_only", "carries_open_gtt", "today"},
+         "sort_order", "generated_at"}
+
+    Each order:
+        {"order_id", "symbol", "exchange", "side", "order_type", "product",
+         "total_quantity", "filled_quantity", "leftover_quantity",
+         "price", "trigger_price", "stop_loss", "target",
+         "status", "status_reason", "source",
+         "trade_nature_id", "trade_nature", "insufficient_funds_action",
+         "error_message", "placed_at", "cancelled_at", "updated_at",
+         "accounts_count", "accounts_selected", "accounts_placed",
+         "accounts_filled", "accounts_open", "accounts_label",
+         "counts", "is_open", "can_modify", "can_cancel", "is_carried_gtt"}
+
+    accounts_label is a PLACED over selected count, for example "4/5", where
+    placed means the order reached the broker (open or filled). The PRD asks for
+    filled over selected, which needs fill reconciliation: until that lands,
+    accounts_filled carries the true filled count separately, so the two are not
+    conflated. status_reason is the short explanation next to PARTIAL, for
+    example "1 failed".
+    """
+    filters, error = _read_book_filters()
+    if error:
+        return _json_error(error, 404 if 'not found' in error else 400)
+
+    include_splits = _arg('splits').lower() in ('1', 'true', 'yes')
+    payload = _build_order_book(
+        filters, carry_open_gtt=True, include_splits=include_splits
+    )
+    return _ok(payload)
+
+
+@equity_bp.route('/api/trade-book')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_trade_book():
+    """
+    M6 Trade Book: one row per fill, linked back to its parent order.
+
+    Query string: the same filters as /equity/api/order-book. With no date
+    filter it shows today's fills.
+
+    Response:
+        {"status", "message",
+         "trades": [{"trade_id", "split_id", "order_id", "account_id",
+                     "account_name", "broker_name", "symbol", "exchange",
+                     "side", "order_type", "product", "source",
+                     "trade_nature_id", "trade_nature",
+                     "execution_price", "executed_quantity", "trade_value",
+                     "executed_at", "broker_trade_id", "broker_order_id",
+                     "order_status", "order_placed_at"}],
+         "totals": {"trades", "quantity", "value"},
+         "filters", "options", "window", "generated_at"}
+
+    order_id is the link back to the parent order, which the screen resolves
+    through /equity/api/orders/<order_id>/splits.
+
+    Fills are written by the order status reconciliation, which is not part of
+    this increment, so this list is empty until that lands. The screen must
+    render an empty state rather than assume rows.
+    """
+    filters, error = _read_book_filters()
+    if error:
+        return _json_error(error, 404 if 'not found' in error else 400)
+
+    return _ok(_build_trade_book(filters))
+
+
+# ---------------------------------------------------------------------------
+# M7 Holdings: stop loss, target, exit mode, the manual sell and the confirm
+# queue.
+#
+# Every sell below goes through equity_order_engine.exit_holding, which is the
+# one helper that claims a holding before it sells it.
+# ---------------------------------------------------------------------------
+
+def _read_level_entries(data):
+    """
+    Read the level editor payload.
+
+    Accepts one entry as a flat object or many under "levels", so the Holdings
+    screen can arm one account or every account holding a symbol in one call.
+    """
+    raw = data.get('levels')
+    if raw is None:
+        entries = [data]
+    elif isinstance(raw, list):
+        entries = raw
+    else:
+        raise _BadRequest('levels must be a list of holdings')
+
+    entries = [entry for entry in entries if isinstance(entry, dict)]
+    if not entries:
+        raise _BadRequest('No holding was supplied')
+    if len(entries) > 50:
+        raise _BadRequest('At most 50 holdings can be edited in one request')
+    return entries
+
+
+def _resolve_level_targets(entries):
+    """
+    Resolve every entry to an account, before any broker read.
+
+    Returns (account_ids, resolved) where resolved is one dict per entry with
+    either a holding_id or the account, symbol and exchange the holding will be
+    looked up by after the sync.
+    """
+    account_ids = set()
+    resolved = []
+
+    for entry in entries:
+        if entry.get('holding_id') not in (None, ''):
+            holding = _read_holding_id(entry)
+            account_ids.add(holding.account_id)
+            resolved.append({
+                'entry': entry,
+                'holding_id': holding.id,
+                'key': _holding_key(holding.account_id, holding.symbol, holding.exchange),
+            })
+            continue
+
+        account_id = _read_int(entry, 'account_id', minimum=1, required=True)
+        if _owned_account(account_id) is None:
+            raise _BadRequest(f'Account {account_id} not found')
+        symbol = _read_symbol(entry)
+        exchange = _read_exchange(entry)
+        account_ids.add(account_id)
+        resolved.append({
+            'entry': entry,
+            'holding_id': None,
+            'key': _holding_key(account_id, symbol, exchange),
+        })
+
+    return sorted(account_ids), resolved
+
+
+def _apply_levels(target, tracked):
+    """
+    Apply one level edit to one tracked holding, in memory.
+
+    Returns (holding_or_None, breach_kind_or_sentinel, result_dict). The caller
+    commits once for every entry and then re-arms the breach records, which has
+    to happen after the commit because clear_breach takes its own row lock.
+    """
+    entry = target['entry']
+    holding = tracked.get(target['key'])
+    account_id, symbol, exchange = target['key']
+
+    refusal = {
+        'account_id': account_id,
+        'symbol': symbol,
+        'exchange': exchange,
+        'holding_id': target['holding_id'],
+        'ok': False,
+        'message': '',
+    }
+
+    if holding is None:
+        refusal['message'] = (
+            f'This account does not hold {symbol}, so there is nothing to set '
+            'a stop loss or a target on.'
+        )
+        return None, None, refusal
+
+    if holding.exit_status not in EQUITY_HOLDING_STATUSES_CLAIMABLE:
+        refusal['holding_id'] = holding.id
+        refusal['message'] = (
+            f'This holding is {holding.exit_status}. Resolve the exit before '
+            'changing its levels.'
+        )
+        return None, None, refusal
+
+    stop_loss = holding.stop_loss
+    target_price = holding.target
+    if 'stop_loss' in entry:
+        stop_loss = _read_price(entry, 'stop_loss')
+    if 'target' in entry:
+        target_price = _read_price(entry, 'target')
+
+    if stop_loss is not None and target_price is not None and stop_loss >= target_price:
+        raise _BadRequest(
+            f'{symbol}: the stop loss must be below the target. A stop loss at '
+            'or above the target is treated as bad data and the monitor skips '
+            'the row entirely.'
+        )
+
+    sl_changed = 'stop_loss' in entry and _to_float(holding.stop_loss) != _to_float(stop_loss)
+    tp_changed = 'target' in entry and _to_float(holding.target) != _to_float(target_price)
+
+    holding.stop_loss = stop_loss
+    holding.target = target_price
+
+    if 'exit_mode' in entry:
+        holding.exit_mode = _read_choice(
+            entry, 'exit_mode', VALID_EXIT_MODES, required=False,
+            default=holding.exit_mode
+        )
+    if 'trade_nature_id' in entry:
+        holding.trade_nature_id = _read_trade_nature_id(entry)
+
+    if sl_changed and tp_changed:
+        breach_kind = 'BOTH'
+    elif sl_changed:
+        breach_kind = EQUITY_EXIT_REASON_STOP_LOSS
+    elif tp_changed:
+        breach_kind = EQUITY_EXIT_REASON_TARGET
+    else:
+        breach_kind = None
+
+    return holding, breach_kind, {
+        'account_id': account_id,
+        'symbol': symbol,
+        'exchange': exchange,
+        'holding_id': holding.id,
+        'ok': True,
+        'message': '',
+    }
+
+
+@equity_bp.route('/api/holdings/sync', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_sync_holdings():
+    """
+    Refresh the tracked holding rows from the broker.
+
+    Why this exists: the Holdings screen reads the broker payload directly, but
+    the stop loss and target monitor works on EquityHolding rows. A row with a
+    stale quantity is a row the monitor could sell the wrong number of shares
+    against, so the Holdings screen should call this when it loads and after a
+    fill. A row the broker no longer reports has its quantity zeroed, which
+    takes it out of the monitor's scan.
+
+    The broker read is served from the 30 second cache when it is warm.
+
+    Request body (optional): {"account_ids": [1, 2]}. Left out, every active
+    account is refreshed.
+
+    Response: {"status", "message", "accounts": [ids], "holdings": [...],
+               "tracked", "monitorable", "generated_at"}
+    """
+    data = _body()
+    account_ids = None
+    if data.get('account_ids'):
+        account_ids = _read_account_ids(data)
+
+    context = _account_context(fetch_holdings=True, fetch_account_ids=account_ids)
+    accounts = context['accounts']
+    if account_ids is not None:
+        wanted = set(account_ids)
+        accounts = [account for account in accounts if account.id in wanted]
+
+    tracked = _sync_holding_rows(accounts, context['snapshots'])
+    directory = _account_directory()
+    rows = [_holding_payload(holding, directory) for holding in tracked.values()]
+    rows.sort(key=lambda row: (row['symbol'], row['account_id']))
+
+    return _ok({
+        'accounts': [account.id for account in accounts],
+        'holdings': rows,
+        'tracked': len(rows),
+        'monitorable': sum(1 for row in rows if row['is_monitorable']),
+        'stale_account_ids': [
+            account.id for account in accounts
+            if (context['snapshots'].get(account.id) or {}).get('is_stale')
+        ],
+        'generated_at': _iso(datetime.utcnow()),
+    }, f'{len(rows)} holdings tracked')
+
+
+@equity_bp.route('/api/holdings/levels', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_set_holding_levels():
+    """
+    Set the stop loss, target, exit mode and trade nature on one holding or on
+    every account holding a symbol.
+
+    Request body, either form:
+        {"account_id": 1, "symbol": "RELIANCE", "exchange": "NSE",
+         "stop_loss": 1350, "target": 1600, "exit_mode": "AUTO",
+         "trade_nature_id": 2}
+        {"levels": [ {...}, {...} ]}
+
+    A holding can also be addressed by {"holding_id": 12} instead of the
+    account and symbol.
+
+    Only the keys present are changed. A key sent as null clears that level, so
+    stop_loss: null removes the stop loss and leaves the target alone.
+
+    Two things happen here that matter:
+        The tracked holdings are refreshed from the broker first, so the
+            monitor arms against the quantity the broker actually reports.
+        Any change to stop_loss or target calls EquityHolding.clear_breach,
+            which re-arms the level. Without it a level that already fired
+            would stay silent for good.
+
+    An exit mode of AUTO means a breach sells immediately. CONFIRM raises an
+    alert and waits for approval, which is what /equity/api/holdings/exit-queue
+    lists.
+
+    Response: {"status", "message", "results": [{"account_id", "symbol",
+               "exchange", "holding_id", "ok", "message"}],
+               "updated", "skipped", "holdings": [...], "generated_at"}
+    """
+    data = _body()
+    entries = _read_level_entries(data)
+    account_ids, targets = _resolve_level_targets(entries)
+
+    context = _account_context(fetch_holdings=True, fetch_account_ids=account_ids)
+    wanted = set(account_ids)
+    accounts = [account for account in context['accounts'] if account.id in wanted]
+    tracked = _sync_holding_rows(accounts, context['snapshots'])
+
+    results = []
+    breaches = []
+    changed = []
+    for target in targets:
+        holding, breach_kind, result = _apply_levels(target, tracked)
+        results.append(result)
+        if holding is None:
+            continue
+        changed.append(holding)
+        if breach_kind is not None:
+            breaches.append((holding.id, breach_kind))
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error(f'Equity holding level save failed: {exc}')
+        return _json_error(f'Failed to save the levels: {exc}', 500)
+
+    # After the commit, never before: clear_breach takes its own row lock and
+    # commits, and it has to see the levels that were just written. The session
+    # is expired first so the lock re-check reads the database rather than a
+    # copy this request loaded earlier.
+    db.session.expire_all()
+    rearm_failed = []
+    for holding_id, kind in breaches:
+        try:
+            if not EquityHolding.clear_breach(
+                holding_id, current_user.id,
+                kind=None if kind == 'BOTH' else kind
+            ):
+                rearm_failed.append(holding_id)
+        except Exception as exc:
+            db.session.rollback()
+            rearm_failed.append(holding_id)
+            current_app.logger.error(
+                f'Could not re-arm the breach records on holding {holding_id}: {exc}'
+            )
+
+    updated = sum(1 for result in results if result['ok'])
+    skipped = len(results) - updated
+    _log_activity('equity_holding_levels_saved', {
+        'updated': updated, 'skipped': skipped,
+        'rearm_failed': rearm_failed,
+        'holdings': [result['holding_id'] for result in results if result['ok']],
+    })
+
+    directory = _account_directory()
+    holdings = [
+        _holding_payload(holding, directory)
+        for holding in EquityHolding.query.filter(
+            EquityHolding.user_id == current_user.id,
+            EquityHolding.id.in_([result['holding_id'] for result in results if result['ok']] or [0])
+        ).all()
+    ]
+
+    message = f'{updated} holding{"" if updated == 1 else "s"} updated'
+    if skipped:
+        message += f', {skipped} skipped'
+    if rearm_failed:
+        # A level that was saved but not re-armed is a level the monitor will
+        # stay silent on, so it is said out loud rather than only logged.
+        message += (
+            f', {len(rearm_failed)} could not be re-armed and will not alert '
+            'until the level is saved again'
+        )
+    return _ok({
+        'results': results,
+        'updated': updated,
+        'skipped': skipped,
+        'rearm_failed': rearm_failed,
+        'holdings': holdings,
+        'generated_at': _iso(datetime.utcnow()),
+    }, message)
+
+
+def _read_sell_targets(data):
+    """
+    Resolve a manual sell request to holdings.
+
+    Accepts:
+        {"holdings": [{"holding_id": 5, "quantity": 10}, ...]}
+        {"holding_ids": [5, 6], "quantity": 10}
+        {"symbol": "RELIANCE", "exchange": "NSE", "account_ids": [1, 2],
+         "quantity": 10}
+
+    quantity is optional everywhere. Left out, the whole sellable quantity is
+    sold, and it is resolved under the claim's own row lock rather than from a
+    number this request read a moment earlier.
+    """
+    jobs = []
+
+    raw = data.get('holdings')
+    if isinstance(raw, list) and raw:
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise _BadRequest('Each holding must be an object')
+            holding = _read_holding_id(entry)
+            job = {'holding_id': holding.id, 'account_id': holding.account_id}
+            if 'quantity' in entry and entry.get('quantity') not in (None, ''):
+                job['quantity'] = _read_int(entry, 'quantity', minimum=1, required=True)
+            jobs.append(job)
+        return jobs
+
+    shared_quantity = None
+    if data.get('quantity') not in (None, ''):
+        shared_quantity = _read_int(data, 'quantity', minimum=1, required=True)
+
+    raw_ids = data.get('holding_ids')
+    if isinstance(raw_ids, list) and raw_ids:
+        for value in raw_ids:
+            holding = _read_holding_id({'holding_id': value})
+            job = {'holding_id': holding.id, 'account_id': holding.account_id}
+            if shared_quantity is not None:
+                job['quantity'] = shared_quantity
+            jobs.append(job)
+        return jobs
+
+    symbol = _read_symbol(data)
+    exchange = _read_exchange(data)
+    account_ids = None
+    if data.get('account_ids'):
+        account_ids = set(_read_account_ids(data))
+
+    query = EquityHolding.query.filter(
+        EquityHolding.user_id == current_user.id,
+        EquityHolding.symbol == symbol,
+        EquityHolding.exchange == exchange,
+    )
+    for holding in query.order_by(EquityHolding.account_id).all():
+        if account_ids is not None and holding.account_id not in account_ids:
+            continue
+        job = {'holding_id': holding.id, 'account_id': holding.account_id}
+        if shared_quantity is not None:
+            job['quantity'] = shared_quantity
+        jobs.append(job)
+
+    if not jobs:
+        raise _BadRequest(f'No tracked holding of {symbol} was found to sell')
+    return jobs
+
+
+@equity_bp.route('/api/holdings/sell', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_sell_holdings():
+    """
+    Sell against one or more tracked holdings, through the claim.
+
+    Every account goes through equity_order_engine.exit_holding, which locks
+    the holding row, re-checks that it is still claimable and carries no broker
+    order id, commits the claim and only then calls the broker. That is what
+    stops this and the background stop loss monitor selling the same shares
+    twice.
+
+    Request body, any of:
+        {"holdings": [{"holding_id": 5, "quantity": 10}]}
+        {"holding_ids": [5, 6], "quantity": 10}
+        {"symbol": "RELIANCE", "exchange": "NSE", "account_ids": [1, 2]}
+    plus optionally:
+        {"order_type": "LIMIT", "price": 1420, "trigger_price": null,
+         "gtt_trigger_leg": "SL"}
+
+    quantity is optional. Left out, the whole sellable quantity is sold, which
+    is the pledged shares subtracted from the holding.
+
+    Response:
+        {"status": "success" | "partial" | "error", "message",
+         "accounts_selected", "accounts_placed", "accounts_failed",
+         "accounts_skipped", "accounts_indeterminate",
+         "results": [{"status", "holding_id", "account_id", "account_name",
+                      "symbol", "exchange", "quantity", "order_id", "split_id",
+                      "broker_order_id", "attempts", "claimed",
+                      "indeterminate", "message"}],
+         "order_ids", "generated_at"}
+
+    A result status of 'skipped' means no broker call was made, usually because
+    another exit was already in flight. 'indeterminate' means the outcome is
+    unknown and the holding is parked as EXIT_INDETERMINATE for a human: it is
+    never retried automatically.
+    """
+    data = _body()
+    jobs = _read_sell_targets(data)
+
+    order_type = _read_choice(
+        data, 'order_type', VALID_ORDER_TYPES, required=False,
+        default=EQUITY_ORDER_TYPE_MARKET
+    )
+    price = _read_price(data, 'price')
+    trigger_price = _read_price(data, 'trigger_price')
+    gtt_trigger_leg = _read_choice(data, 'gtt_trigger_leg', ('SL', 'TG'), required=False)
+
+    if order_type == EQUITY_ORDER_TYPE_LIMIT and not price:
+        raise _BadRequest('A LIMIT sell needs a price')
+    if order_type == EQUITY_ORDER_TYPE_GTT and (not price or not trigger_price):
+        raise _BadRequest('A GTT sell needs both a limit price and a trigger price')
+
+    # The claim reads the quantity off the holding row, so refresh it from the
+    # broker before anything is claimed.
+    account_ids = sorted({job['account_id'] for job in jobs})
+    context = _account_context(fetch_holdings=True, fetch_account_ids=account_ids)
+    wanted = set(account_ids)
+    accounts = [account for account in context['accounts'] if account.id in wanted]
+    _sync_holding_rows(accounts, context['snapshots'])
+    db.session.expire_all()
+
+    results = _fan_out_exits(
+        jobs,
+        reason=EQUITY_EXIT_REASON_MANUAL,
+        order_type=order_type,
+        price=price,
+        trigger_price=trigger_price,
+        gtt_trigger_leg=gtt_trigger_leg,
+    )
+
+    directory = _account_directory()
+    holdings = {
+        holding.id: holding
+        for holding in EquityHolding.query.filter(
+            EquityHolding.user_id == current_user.id,
+            EquityHolding.id.in_([job['holding_id'] for job in jobs])
+        ).all()
+    }
+    for result in results:
+        holding = holdings.get(result.get('holding_id'))
+        account = directory.get(result.get('account_id')) or {}
+        result['account_name'] = account.get('account_name')
+        result['symbol'] = holding.symbol if holding is not None else None
+        result['exchange'] = holding.exchange if holding is not None else None
+        result['exit_status'] = holding.exit_status if holding is not None else None
+
+    payload = _exit_counts(results)
+    payload['results'] = results
+    payload['order_ids'] = [
+        result['order_id'] for result in results if result.get('order_id')
+    ]
+    payload['generated_at'] = _iso(datetime.utcnow())
+
+    _log_activity('equity_holdings_sold', {
+        'holdings': [job['holding_id'] for job in jobs],
+        'order_type': order_type,
+        'accounts_placed': payload['accounts_placed'],
+        'accounts_selected': payload['accounts_selected'],
+        'result': payload['status'],
+    })
+
+    return jsonify(payload)
+
+
+@equity_bp.route('/api/holdings/exit-queue')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_exit_queue():
+    """
+    The holdings waiting on a human.
+
+    Three groups, and they are three different problems:
+        awaiting_confirm  a CONFIRM mode holding whose stop loss or target was
+            breached. The monitor alerted and stopped. Approve it with
+            /equity/api/holdings/<id>/confirm-exit or decline it with
+            /equity/api/holdings/<id>/dismiss-exit.
+        in_flight         a sell that is claimed or already at the broker.
+            Nothing to do but wait.
+        indeterminate     a sell whose outcome was never confirmed. It is NEVER
+            retried automatically. Check the broker order book, then clear it
+            with /equity/api/holdings/<id>/resolve-exit.
+
+    Response: {"status", "message", "awaiting_confirm": [...],
+               "in_flight": [...], "indeterminate": [...],
+               "counts": {...}, "monitor": {...}, "generated_at"}
+
+    Every holding entry has the keys documented on
+    /equity/api/holdings/sync.
+    """
+    statuses = (
+        (EQUITY_HOLDING_STATUS_AWAITING_CONFIRM,)
+        + EQUITY_HOLDING_STATUSES_EXIT_IN_FLIGHT
+        + (EQUITY_HOLDING_STATUS_EXIT_INDETERMINATE,)
+    )
+    rows = EquityHolding.query.filter(
+        EquityHolding.user_id == current_user.id,
+        EquityHolding.exit_status.in_(statuses)
+    ).order_by(EquityHolding.symbol, EquityHolding.account_id).all()
+
+    directory = _account_directory()
+    awaiting = []
+    in_flight = []
+    indeterminate = []
+    for holding in rows:
+        payload = _holding_payload(holding, directory)
+        if holding.exit_status == EQUITY_HOLDING_STATUS_AWAITING_CONFIRM:
+            awaiting.append(payload)
+        elif holding.exit_status == EQUITY_HOLDING_STATUS_EXIT_INDETERMINATE:
+            indeterminate.append(payload)
+        else:
+            in_flight.append(payload)
+
+    settings = _equity_settings()
+    return _ok({
+        'awaiting_confirm': awaiting,
+        'in_flight': in_flight,
+        'indeterminate': indeterminate,
+        'counts': {
+            'awaiting_confirm': len(awaiting),
+            'in_flight': len(in_flight),
+            'indeterminate': len(indeterminate),
+        },
+        'monitor': {
+            'enabled': bool(settings.sl_monitor_enabled) if settings else True,
+            'last_run_at': _iso(settings.monitor_last_run_at) if settings else None,
+            'last_error': settings.monitor_last_error if settings else None,
+        },
+        'generated_at': _iso(datetime.utcnow()),
+    })
+
+
+@equity_bp.route('/api/holdings/<int:holding_id>/confirm-exit', methods=['POST'])
+@login_required
+@heavy_rate_limit()
+@_json_route
+def api_confirm_exit(holding_id):
+    """
+    Approve the exit on a CONFIRM mode holding whose level was breached.
+
+    The claim is taken from AWAITING_CONFIRM only, so an approval cannot fire
+    against a holding that was never alerted. The exit reason recorded by the
+    monitor is preserved, so the order book still says whether this was a stop
+    loss or a target.
+
+    Request body (optional): {"order_type": "LIMIT", "price": 1420,
+                              "quantity": 10}
+
+    Response: the exit_holding result, with account_name, symbol and exchange
+    added. See /equity/api/holdings/sell for the shape and for what each status
+    means.
+    """
+    holding = _owned_holding(holding_id)
+    if holding is None:
+        return _json_error('Holding not found', 404)
+    if holding.exit_status != EQUITY_HOLDING_STATUS_AWAITING_CONFIRM:
+        raise _BadRequest(
+            f'This holding is {holding.exit_status} and is not waiting for an '
+            'exit to be approved.'
+        )
+
+    data = _body()
+    order_type = _read_choice(
+        data, 'order_type', VALID_ORDER_TYPES, required=False,
+        default=EQUITY_ORDER_TYPE_MARKET
+    )
+    price = _read_price(data, 'price')
+    trigger_price = _read_price(data, 'trigger_price')
+    quantity = _read_int(data, 'quantity', minimum=1)
+
+    if order_type == EQUITY_ORDER_TYPE_LIMIT and not price:
+        raise _BadRequest('A LIMIT sell needs a price')
+    if order_type == EQUITY_ORDER_TYPE_GTT and (not price or not trigger_price):
+        raise _BadRequest('A GTT sell needs both a limit price and a trigger price')
+
+    reason = holding.exit_reason or EQUITY_EXIT_REASON_MANUAL
+    symbol = holding.symbol
+    exchange = holding.exchange
+    account_id = holding.account_id
+
+    # The transitions re-check under a row lock, so the session is expired
+    # first and the lock reads the database rather than the copy loaded above.
+    db.session.expire_all()
+
+    result = exit_holding(
+        user_id=current_user.id,
+        holding_id=holding_id,
+        reason=reason,
+        quantity=quantity,
+        order_type=order_type,
+        price=price,
+        trigger_price=trigger_price,
+        allow_from=(EQUITY_HOLDING_STATUS_AWAITING_CONFIRM,),
+    )
+    directory = _account_directory()
+    result['account_name'] = (directory.get(account_id) or {}).get('account_name')
+    result['symbol'] = symbol
+    result['exchange'] = exchange
+
+    _log_activity('equity_exit_confirmed', {
+        'holding_id': holding_id, 'symbol': symbol, 'reason': reason,
+        'result': result.get('status'), 'order_id': result.get('order_id'),
+    }, account_id=account_id)
+
+    return jsonify(result)
+
+
+@equity_bp.route('/api/holdings/<int:holding_id>/dismiss-exit', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_dismiss_exit(holding_id):
+    """
+    Decline the exit on a CONFIRM mode holding whose level was breached.
+
+    The holding goes back to ACTIVE and the breach record STAYS, so the monitor
+    does not raise the same alert again ten seconds later while the price is
+    still through the level. Editing the stop loss or the target re-arms it,
+    which goes through /equity/api/holdings/levels.
+
+    Response: {"status", "message", "holding": {...}}
+    """
+    holding = _owned_holding(holding_id)
+    if holding is None:
+        return _json_error('Holding not found', 404)
+
+    symbol = holding.symbol
+    db.session.expire_all()
+
+    if not EquityHolding.dismiss_exit_confirm(holding_id, current_user.id):
+        raise _BadRequest(
+            'This holding is not waiting for an exit to be approved, so there '
+            'is nothing to decline.'
+        )
+
+    _log_activity('equity_exit_dismissed', {'holding_id': holding_id, 'symbol': symbol})
+
+    holding = _owned_holding(holding_id)
+    return _ok({
+        'holding': _holding_payload(holding, _account_directory()) if holding else None,
+        'generated_at': _iso(datetime.utcnow()),
+    }, f'Exit alert on {symbol} declined. The level stays set and will not alert again until it is edited.')
+
+
+@equity_bp.route('/api/holdings/<int:holding_id>/resolve-exit', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_resolve_exit(holding_id):
+    """
+    Clear a holding parked as EXIT_INDETERMINATE, after a human checked the
+    broker and confirmed no order is live.
+
+    An indeterminate exit is never retried automatically, because the order may
+    already be at the broker even though the answer never came back. This is
+    the deliberate human step that reopens the holding.
+
+    Request body (optional): {"note": "checked Zerodha, no order"}
+
+    Response: {"status", "message", "holding": {...}}
+    """
+    holding = _owned_holding(holding_id)
+    if holding is None:
+        return _json_error('Holding not found', 404)
+
+    data = _body()
+    note = _read_text(data, 'note', maximum=500, required=False, default='')
+    symbol = holding.symbol
+    db.session.expire_all()
+
+    if not EquityHolding.resolve_exit_indeterminate(
+        holding_id, current_user.id, note=note or None
+    ):
+        raise _BadRequest(
+            'This holding is not parked as an unconfirmed exit, so there is '
+            'nothing to reconcile.'
+        )
+
+    _log_activity('equity_exit_reconciled', {
+        'holding_id': holding_id, 'symbol': symbol, 'note': note
+    })
+
+    holding = _owned_holding(holding_id)
+    return _ok({
+        'holding': _holding_payload(holding, _account_directory()) if holding else None,
+        'generated_at': _iso(datetime.utcnow()),
+    }, f'{symbol} reopened. The monitor can watch it again.')
+
+
+# ---------------------------------------------------------------------------
+# Settings: the module wide switches
+# ---------------------------------------------------------------------------
+
+@equity_bp.route('/api/settings/preferences')
+@login_required
+@api_rate_limit()
+@_json_route
+def api_settings_preferences():
+    """
+    The equity module preferences, plus the stop loss monitor heartbeat.
+
+    Response:
+        {"status", "message",
+         "settings": {"insufficient_funds_action", "default_exit_mode",
+                      "sl_monitor_enabled", "sl_monitor_interval_seconds",
+                      "price_alerts_enabled", "monitor_last_run_at",
+                      "monitor_last_error", "updated_at"},
+         "monitor": {...the exit monitor's own status block...},
+         "options": {"insufficient_funds_actions", "exit_modes",
+                     "monitor_interval_seconds": {"minimum", "maximum"}},
+         "exit_mode_tags", "generated_at"}
+
+    monitor_last_run_at is written by the background scheduler job, so a recent
+    heartbeat is what proves the monitor runs with every browser tab closed.
+    """
+    return _ok(_build_preferences_payload())
+
+
+@equity_bp.route('/api/settings/preferences', methods=['POST'])
+@login_required
+@api_rate_limit()
+@_json_route
+def api_save_settings_preferences():
+    """
+    Save the equity module preferences.
+
+    Request body (all optional, only the keys present are changed):
+        {"insufficient_funds_action": "SKIP" | "ABORT",
+         "default_exit_mode": "AUTO" | "CONFIRM",
+         "sl_monitor_enabled": true,
+         "sl_monitor_interval_seconds": 30,
+         "price_alerts_enabled": true}
+
+    insufficient_funds_action is the PRD default in force for a new order: SKIP
+    lets every other account through, ABORT places nothing at all. It is
+    snapshotted onto each order, so changing it here never rewrites what a past
+    order did.
+
+    default_exit_mode is the exit mode a newly tracked holding starts with. It
+    does not change any holding that already exists.
+
+    Response: the /equity/api/settings/preferences read shape.
+    """
+    data = _body()
+    settings = _equity_settings()
+    changes = {}
+
+    if 'insufficient_funds_action' in data:
+        value = _read_choice(data, 'insufficient_funds_action', VALID_FUNDS_ACTIONS)
+        if value != settings.insufficient_funds_action:
+            changes['insufficient_funds_action'] = {
+                'from': settings.insufficient_funds_action, 'to': value
+            }
+            settings.insufficient_funds_action = value
+
+    if 'default_exit_mode' in data:
+        value = _read_choice(data, 'default_exit_mode', VALID_EXIT_MODES)
+        if value != settings.default_exit_mode:
+            changes['default_exit_mode'] = {
+                'from': settings.default_exit_mode, 'to': value
+            }
+            settings.default_exit_mode = value
+
+    if 'sl_monitor_enabled' in data:
+        value = bool(_read_bool(data, 'sl_monitor_enabled', default=True))
+        if value != bool(settings.sl_monitor_enabled):
+            changes['sl_monitor_enabled'] = {
+                'from': bool(settings.sl_monitor_enabled), 'to': value
+            }
+            settings.sl_monitor_enabled = value
+
+    if 'sl_monitor_interval_seconds' in data:
+        value = _read_int(
+            data, 'sl_monitor_interval_seconds',
+            minimum=MIN_MONITOR_INTERVAL_SECONDS,
+            maximum=MAX_MONITOR_INTERVAL_SECONDS,
+            required=True
+        )
+        if value != _to_int(settings.sl_monitor_interval_seconds):
+            changes['sl_monitor_interval_seconds'] = {
+                'from': _to_int(settings.sl_monitor_interval_seconds), 'to': value
+            }
+            settings.sl_monitor_interval_seconds = value
+
+    if 'price_alerts_enabled' in data:
+        value = bool(_read_bool(data, 'price_alerts_enabled', default=True))
+        if value != bool(settings.price_alerts_enabled):
+            changes['price_alerts_enabled'] = {
+                'from': bool(settings.price_alerts_enabled), 'to': value
+            }
+            settings.price_alerts_enabled = value
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error(f'Equity preferences save failed: {exc}')
+        return _json_error(f'Failed to save the equity preferences: {exc}', 500)
+
+    if changes:
+        _log_activity('equity_preferences_saved', {'changes': changes})
+
+    return _ok(_build_preferences_payload(), 'Equity preferences saved')

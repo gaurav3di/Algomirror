@@ -16,16 +16,17 @@
     <!-- Header -->
     <div class="flex justify-between items-center flex-wrap gap-3">
         <div>
-            <h1 class="text-3xl font-bold">Equity Dashboard</h1>
+            <h1 class="text-3xl font-bold">Equity Trading</h1>
             <p class="text-base-content/70 mt-1">
-                CNC delivery holdings and cash across all connected accounts. This screen is read-only.
+                One-click investment and swing trades across all accounts.
             </p>
         </div>
         <div class="flex gap-3 items-center flex-wrap">
             <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
-            <button onclick="equityLoadDashboard()" class="btn btn-primary btn-sm h-9" id="equity-refresh-btn">
+            <button onclick="equityLoadDashboard()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">
                 Refresh
             </button>
+            <a href="{{ url_for('equity.place_order') }}" class="btn btn-primary btn-sm h-9">New Order</a>
         </div>
     </div>
 
@@ -145,7 +146,7 @@
         <div class="card-body">
             <h2 class="card-title">Today's Orders</h2>
             <p class="text-sm text-base-content/60">
-                Equity orders placed today. Order placement arrives in a later increment, so this table stays empty for now.
+                Every multi-account equity order placed today. Use View Split to see the per-account breakdown.
             </p>
 
             <div class="overflow-x-auto">
@@ -211,13 +212,13 @@ const EquityFormat = {
     // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
     compact: function (value) {
         const num = Number(value);
-        if (!isFinite(num)) { return 'Rs 0'; }
+        if (!isFinite(num)) { return '₹0'; }
         const sign = num < 0 ? '-' : '';
         const abs = Math.abs(num);
         if (abs >= EquityFormat.LAKH) {
-            return sign + 'Rs ' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+            return sign + '₹' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
         }
-        return sign + 'Rs ' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+        return sign + '₹' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
     },
 
     // Plain Indian grouped rupees with paise, for row level figures.
@@ -225,7 +226,7 @@ const EquityFormat = {
         const num = Number(value);
         if (!isFinite(num)) { return 'Rs 0.00'; }
         const sign = num < 0 ? '-' : '';
-        return sign + 'Rs ' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return sign + '₹' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     },
 
     // Percent to one decimal place, keeping a second decimal only where it

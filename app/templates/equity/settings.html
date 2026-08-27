@@ -16,23 +16,168 @@
     <!-- Header -->
     <div class="flex justify-between items-center flex-wrap gap-3">
         <div>
-            <h1 class="text-3xl font-bold">Brokerage and Charges</h1>
+            <h1 class="text-3xl font-bold">Equity Settings</h1>
             <p class="text-base-content/70 mt-1">
-                Rates per account and broker. Saving inserts a new effective-dated version, it never rewrites history.
+                Module preferences, trade natures and brokerage rates. Rates are versioned by effective date, so
+                saving never rewrites a past cost figure.
             </p>
         </div>
         <div class="flex gap-3 items-center flex-wrap">
             <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
-            {% if accounts %}
-            <button onclick="equityLoadRates()" class="btn btn-ghost btn-sm h-9" id="equity-reload-btn">Reload</button>
-            <button onclick="equitySaveRates()" class="btn btn-primary btn-sm h-9" id="equity-save-btn">Save Rates</button>
-            {% endif %}
         </div>
     </div>
 
     <!-- Load or save result -->
     <div class="alert hidden" id="equity-result-banner">
         <span id="equity-result-text"></span>
+    </div>
+
+    <!--
+        MODULE PREFERENCES.
+
+        The insufficient funds switch is the PRD default for a new order. It is
+        snapshotted onto each order, so changing it here never rewrites what a
+        past order did.
+    -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <div class="flex justify-between items-center gap-3 flex-wrap">
+                <h2 class="card-title">Module Preferences</h2>
+                <button onclick="equitySavePreferences()" class="btn btn-primary btn-sm"
+                        id="equity-prefs-save-btn">Save Preferences</button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="form-control">
+                    <label class="label" for="equity-prefs-funds">
+                        <span class="label-text">If an account cannot fund its share of an order</span>
+                    </label>
+                    <select id="equity-prefs-funds" class="select select-bordered select-sm">
+                        <option value="SKIP">Skip that account, place the rest</option>
+                        <option value="ABORT">Abort the whole order, place nothing</option>
+                    </select>
+                    <label class="label">
+                        <span class="label-text-alt">
+                            The default on the Place Order screen, which can still be changed per order.
+                        </span>
+                    </label>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-prefs-exit-mode">
+                        <span class="label-text">Exit mode for a newly tracked holding</span>
+                    </label>
+                    <select id="equity-prefs-exit-mode" class="select select-bordered select-sm">
+                        <option value="CONFIRM">CONFIRM, alert and wait for approval</option>
+                        <option value="AUTO">AUTO, sell immediately on a breach</option>
+                    </select>
+                    <label class="label">
+                        <span class="label-text-alt">Does not change any holding that already exists.</span>
+                    </label>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-prefs-interval">
+                        <span class="label-text">Stop loss monitor interval, seconds</span>
+                    </label>
+                    <input type="number" id="equity-prefs-interval" class="input input-bordered input-sm equity-num"
+                           min="1" max="300" step="1" value="30">
+                    <label class="label">
+                        <span class="label-text-alt" id="equity-prefs-interval-hint">Between 1 and 300 seconds.</span>
+                    </label>
+                </div>
+
+                <div class="form-control gap-2 justify-center">
+                    <label class="label cursor-pointer justify-start gap-3">
+                        <input type="checkbox" id="equity-prefs-monitor" class="toggle toggle-sm toggle-primary">
+                        <span class="label-text">Stop loss and target monitor enabled</span>
+                    </label>
+                    <label class="label cursor-pointer justify-start gap-3">
+                        <input type="checkbox" id="equity-prefs-alerts" class="toggle toggle-sm toggle-primary">
+                        <span class="label-text">Watch list price alerts enabled</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- The heartbeat is the proof the monitor runs with no tab open. -->
+            <div class="alert mt-2" id="equity-monitor-banner">
+                <span id="equity-monitor-text">Monitor status not loaded yet.</span>
+            </div>
+
+            <p class="text-xs text-base-content/60">
+                The monitor runs in the background scheduler, not in this page. A recent last run with every browser
+                tab closed is what proves an AUTO stop loss would actually fire.
+            </p>
+        </div>
+    </div>
+
+    <!--
+        TRADE NATURES.
+
+        Admin configurable: the four seeded values are only seeds. A nature is
+        never deleted, because watch list rows, orders and holdings point at it
+        and their history has to stay readable.
+    -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Trade Natures</h2>
+            <p class="text-sm text-base-content/60">
+                The categories offered on the Watch List, Place Order and Holdings screens. Deactivating takes a
+                nature out of those dropdowns and leaves every row that already uses it untouched.
+            </p>
+
+            <div class="flex items-end gap-3 flex-wrap">
+                <div class="form-control">
+                    <label class="label" for="equity-nature-name">
+                        <span class="label-text">New Trade Nature</span>
+                    </label>
+                    <input type="text" id="equity-nature-name" class="input input-bordered input-sm w-64"
+                           maxlength="50" placeholder="For example: Positional">
+                </div>
+                <button onclick="equityCreateNature()" class="btn btn-primary btn-sm" id="equity-nature-add-btn">Add</button>
+            </div>
+
+            <div class="overflow-x-auto mt-2">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th class="text-right">Order</th>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="equity-natures-body">
+                        <tr>
+                            <td colspan="4" class="text-center py-8 text-base-content/60">
+                                Loading trade natures.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p class="text-xs text-base-content/60">
+                Renaming a nature renames it everywhere it is already used, including on past orders. Move Up and
+                Move Down set the order the dropdowns show.
+            </p>
+        </div>
+    </div>
+
+    <!-- Brokerage rates -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h2 class="text-2xl font-bold">Brokerage &amp; Charges</h2>
+            <p class="text-base-content/70 mt-1">
+                Rates per account and broker. Saving inserts a new effective-dated version, it never rewrites history.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            {% if accounts %}
+            <button onclick="equityLoadRates()" class="btn btn-ghost btn-sm h-9" id="equity-reload-btn">Reload Rates</button>
+            <button onclick="equitySaveRates()" class="btn btn-primary btn-sm h-9" id="equity-save-btn">Save Rates</button>
+            {% endif %}
+        </div>
     </div>
 
     {% if accounts %}
@@ -67,7 +212,7 @@
                 <table class="table table-sm">
                     <thead>
                         <tr>
-                            <th>Account</th>
+                            <th>Member</th>
                             <th>Broker</th>
                             <th>Version in Effect</th>
                             <th class="text-right">Brokerage (Rs per order)</th>
@@ -92,49 +237,49 @@
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="brokerage_per_order"
-                                       min="0" step="0.01" value="0">
+                                       min="0" step="0.01" placeholder="0">
                             </td>
                             <td>
                                 <input type="number"
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="stt_pct"
-                                       min="0" max="100" step="0.00001" value="0">
+                                       min="0" max="100" step="0.00001" placeholder="0">
                             </td>
                             <td>
                                 <input type="number"
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="exchange_txn_pct"
-                                       min="0" max="100" step="0.00001" value="0">
+                                       min="0" max="100" step="0.00001" placeholder="0">
                             </td>
                             <td>
                                 <input type="number"
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="sebi_pct"
-                                       min="0" max="100" step="0.00001" value="0">
+                                       min="0" max="100" step="0.00001" placeholder="0">
                             </td>
                             <td>
                                 <input type="number"
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="stamp_duty_pct"
-                                       min="0" max="100" step="0.00001" value="0">
+                                       min="0" max="100" step="0.00001" placeholder="0">
                             </td>
                             <td>
                                 <input type="number"
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="gst_pct"
-                                       min="0" max="100" step="0.01" value="0">
+                                       min="0" max="100" step="0.01" placeholder="0">
                             </td>
                             <td>
                                 <input type="number"
                                        class="input input-bordered input-sm w-32 equity-num"
                                        data-account-id="{{ account.id }}"
                                        data-field="dp_amc_charge"
-                                       min="0" step="0.01" value="0">
+                                       min="0" step="0.01" placeholder="0">
                             </td>
                         </tr>
                         {% endfor %}
@@ -184,14 +329,23 @@
 // ---------------------------------------------------------------------------
 
 // One shared formatting helper for the whole screen. This screen edits raw
-// rate figures in their own input boxes, so the only formatting it needs is
-// the clock on the last-updated marker.
+// figures in their own input boxes, so the only formatting it needs is the
+// clock on the last-updated marker and the monitor heartbeat.
 const EquityFormat = {
     clockTime: function (isoText) {
         if (!isoText) { return ''; }
         const parsed = new Date(isoText);
         if (isNaN(parsed.getTime())) { return ''; }
         return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    },
+
+    // The monitor heartbeat needs a date as well as a clock: a last run from
+    // yesterday reading as a plain time would look current.
+    dateTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleString('en-IN', { hour12: false });
     }
 };
 
@@ -404,7 +558,390 @@ async function equitySaveRates() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Module preferences and the stop loss monitor heartbeat
+// ---------------------------------------------------------------------------
+
+function equityApplyPreferences(payload) {
+    const settings = payload.settings || {};
+    const options = payload.options || {};
+
+    const funds = document.getElementById('equity-prefs-funds');
+    if (funds && settings.insufficient_funds_action) { funds.value = settings.insufficient_funds_action; }
+
+    const exitMode = document.getElementById('equity-prefs-exit-mode');
+    if (exitMode && settings.default_exit_mode) { exitMode.value = settings.default_exit_mode; }
+
+    const interval = document.getElementById('equity-prefs-interval');
+    const bounds = options.monitor_interval_seconds || {};
+    if (interval) {
+        if (bounds.minimum !== undefined) { interval.min = String(bounds.minimum); }
+        if (bounds.maximum !== undefined) { interval.max = String(bounds.maximum); }
+        if (document.activeElement !== interval) {
+            interval.value = settings.sl_monitor_interval_seconds;
+        }
+    }
+    if (bounds.minimum !== undefined && bounds.maximum !== undefined) {
+        equitySetText(
+            'equity-prefs-interval-hint',
+            'Between ' + bounds.minimum + ' and ' + bounds.maximum + ' seconds.',
+            'label-text-alt'
+        );
+    }
+
+    const monitorToggle = document.getElementById('equity-prefs-monitor');
+    if (monitorToggle) { monitorToggle.checked = Boolean(settings.sl_monitor_enabled); }
+
+    const alertsToggle = document.getElementById('equity-prefs-alerts');
+    if (alertsToggle) { alertsToggle.checked = Boolean(settings.price_alerts_enabled); }
+
+    equityApplyMonitorStatus(payload);
+    equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(payload.generated_at));
+}
+
+function equityApplyMonitorStatus(payload) {
+    const settings = payload.settings || {};
+    const monitor = payload.monitor || {};
+    const banner = document.getElementById('equity-monitor-banner');
+
+    const parts = [];
+    let kind = 'alert-success';
+
+    if (!settings.sl_monitor_enabled) {
+        parts.push('The stop loss and target monitor is switched OFF, so no level will be acted on.');
+        kind = 'alert-warning';
+    } else if (monitor.available === false) {
+        parts.push('The monitor module could not be read, so its state is unknown.');
+        kind = 'alert-warning';
+    } else if (monitor.is_running) {
+        parts.push('The monitor is running in the background scheduler.');
+    } else {
+        parts.push('The monitor is enabled but is NOT reporting as running. Restart the application and check the '
+            + 'application log.');
+        kind = 'alert-error';
+    }
+
+    const lastRun = settings.monitor_last_run_at || monitor.last_run_at;
+    if (lastRun) {
+        parts.push('Last run ' + EquityFormat.dateTime(lastRun) + '.');
+    } else {
+        parts.push('It has not recorded a run yet.');
+    }
+
+    if (monitor.holdings_tracked !== undefined) {
+        parts.push(monitor.holdings_tracked + ' holding(s) tracked, '
+            + (monitor.exits_in_flight || 0) + ' exit(s) in flight.');
+    }
+
+    const error = settings.monitor_last_error || monitor.last_error;
+    if (error) {
+        parts.push('Last error: ' + error);
+        kind = 'alert-error';
+    }
+
+    if (banner) { banner.className = 'alert mt-2 ' + kind; }
+    equitySetText('equity-monitor-text', parts.join(' '));
+}
+
+async function equityLoadPreferences() {
+    try {
+        const response = await fetch('/equity/api/settings/preferences?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The module preferences could not be loaded.', 'error');
+            return;
+        }
+
+        equityApplyPreferences(data);
+    } catch (error) {
+        // Degrade to a visible marker, never blank the controls.
+        equityShowResult('The module preferences could not be loaded. The boxes show the last values loaded.', 'error');
+        console.error('Equity preferences load failed:', error);
+    }
+}
+
+async function equitySavePreferences() {
+    const button = document.getElementById('equity-prefs-save-btn');
+    if (button) {
+        if (button.disabled) { return; }
+        button.disabled = true;
+    }
+
+    const intervalRaw = (document.getElementById('equity-prefs-interval') || {}).value || '';
+    const interval = parseInt(String(intervalRaw).trim(), 10);
+    if (!isFinite(interval) || interval < 1 || interval > 300) {
+        equityShowResult('The monitor interval must be a whole number of seconds between 1 and 300.', 'error');
+        if (button) { button.disabled = false; }
+        return;
+    }
+
+    const body = {
+        insufficient_funds_action: (document.getElementById('equity-prefs-funds') || {}).value,
+        default_exit_mode: (document.getElementById('equity-prefs-exit-mode') || {}).value,
+        sl_monitor_interval_seconds: interval,
+        sl_monitor_enabled: Boolean((document.getElementById('equity-prefs-monitor') || {}).checked),
+        price_alerts_enabled: Boolean((document.getElementById('equity-prefs-alerts') || {}).checked)
+    };
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/settings/preferences', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The module preferences could not be saved.', 'error');
+            return;
+        }
+
+        equityApplyPreferences(data);
+        equityShowResult(data.message || 'Equity preferences saved.', 'success');
+    } catch (error) {
+        equityShowResult('The module preferences could not be saved. Check the connection and try again.', 'error');
+        console.error('Equity preferences save failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trade natures
+//
+// Every cell is written with textContent or through a form control's value, so
+// an admin supplied nature name can never be treated as markup.
+// ---------------------------------------------------------------------------
+
+let equityNatures = [];
+
+function equityNatureRow(nature, index, total) {
+    const tr = document.createElement('tr');
+    tr.className = nature.is_active ? 'hover' : 'hover opacity-60';
+
+    const order = document.createElement('td');
+    order.className = 'text-right';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center justify-end gap-1';
+
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'btn btn-xs btn-ghost';
+    up.textContent = 'Up';
+    up.disabled = index === 0;
+    up.onclick = function () { equityMoveNature(nature.id, -1); };
+    wrapper.appendChild(up);
+
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'btn btn-xs btn-ghost';
+    down.textContent = 'Down';
+    down.disabled = index === total - 1;
+    down.onclick = function () { equityMoveNature(nature.id, 1); };
+    wrapper.appendChild(down);
+
+    order.appendChild(wrapper);
+    tr.appendChild(order);
+
+    const name = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'input input-bordered input-sm w-64';
+    input.maxLength = 50;
+    input.value = nature.name;
+    input.setAttribute('aria-label', 'Name of trade nature ' + nature.name);
+    input.onchange = function () { equityRenameNature(nature, input); };
+    name.appendChild(input);
+    tr.appendChild(name);
+
+    const status = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.className = nature.is_active ? 'badge badge-success badge-sm' : 'badge badge-ghost badge-sm';
+    badge.textContent = nature.is_active ? 'Active' : 'Inactive';
+    status.appendChild(badge);
+    tr.appendChild(status);
+
+    const actions = document.createElement('td');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = nature.is_active ? 'btn btn-xs btn-outline' : 'btn btn-xs btn-primary';
+    toggle.textContent = nature.is_active ? 'Deactivate' : 'Reactivate';
+    toggle.title = nature.is_active
+        ? 'Takes it out of the dropdowns. Every row that already uses it keeps it.'
+        : 'Puts it back in the dropdowns.';
+    toggle.onclick = function () { equityToggleNature(nature, toggle); };
+    actions.appendChild(toggle);
+    tr.appendChild(actions);
+
+    return tr;
+}
+
+function equityRenderNatures(payload, force) {
+    equityNatures = payload.trade_natures || [];
+
+    const body = document.getElementById('equity-natures-body');
+    if (!body) { return; }
+
+    // A background rebuild would discard a rename part way through typing. A
+    // write passes force, because the row that was just clicked has to show
+    // the new state even though the button that did it still has focus.
+    const active = document.activeElement;
+    if (!force && active && body.contains(active)) { return; }
+
+    body.textContent = '';
+
+    if (!equityNatures.length) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.className = 'text-center py-8 text-base-content/60';
+        cell.textContent = 'No trade natures yet. Add one above to start categorising stocks.';
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+    }
+
+    equityNatures.forEach(function (nature, index) {
+        body.appendChild(equityNatureRow(nature, index, equityNatures.length));
+    });
+}
+
+async function equityNatureRequest(url, options, successMessage) {
+    try {
+        const response = await fetchWithCSRF(url, Object.assign({
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        }, options));
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The trade nature could not be saved.', 'error');
+            equityLoadNatures();
+            return null;
+        }
+
+        equityRenderNatures(data, true);
+        equityShowResult(successMessage || data.message || 'Saved.', 'success');
+        return data;
+    } catch (error) {
+        equityShowResult('The trade nature could not be saved. Check the connection and try again.', 'error');
+        console.error('Equity trade nature request failed:', error);
+        equityLoadNatures();
+        return null;
+    }
+}
+
+async function equityLoadNatures() {
+    try {
+        const response = await fetch('/equity/api/trade-natures?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The trade natures could not be loaded.', 'error');
+            return;
+        }
+
+        equityRenderNatures(data);
+    } catch (error) {
+        // Degrade to a visible marker, never blank the list.
+        equityShowResult('The trade natures could not be loaded. The list shows the last values loaded.', 'error');
+        console.error('Equity trade natures load failed:', error);
+    }
+}
+
+async function equityCreateNature() {
+    const input = document.getElementById('equity-nature-name');
+    const name = input ? (input.value || '').trim() : '';
+    if (!name) {
+        equityShowResult('Enter a name for the new trade nature.', 'error');
+        return;
+    }
+
+    const button = document.getElementById('equity-nature-add-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const data = await equityNatureRequest(
+            '/equity/api/trade-natures',
+            { method: 'POST', body: JSON.stringify({ name: name }) },
+            'Trade nature ' + name + ' created.'
+        );
+        if (data && input) { input.value = ''; }
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+function equityRenameNature(nature, input) {
+    const name = (input.value || '').trim();
+    if (!name) {
+        equityShowResult('A trade nature needs a name. The old name has been put back.', 'error');
+        input.value = nature.name;
+        return;
+    }
+    if (name === nature.name) { return; }
+
+    equityNatureRequest(
+        '/equity/api/trade-natures/' + nature.id,
+        { method: 'POST', body: JSON.stringify({ name: name }) },
+        'Renamed to ' + name + '. Every row that uses it now reads the new name.'
+    );
+}
+
+async function equityToggleNature(nature, button) {
+    if (button) {
+        if (button.disabled) { return; }
+        button.disabled = true;
+    }
+
+    try {
+        if (nature.is_active) {
+            // DELETE is a deactivation, never a removal: watch list rows,
+            // orders and holdings point at this nature.
+            await equityNatureRequest(
+                '/equity/api/trade-natures/' + nature.id,
+                { method: 'DELETE' },
+                nature.name + ' deactivated. Existing rows keep it.'
+            );
+        } else {
+            await equityNatureRequest(
+                '/equity/api/trade-natures/' + nature.id,
+                { method: 'POST', body: JSON.stringify({ is_active: true }) },
+                nature.name + ' is back in the dropdowns.'
+            );
+        }
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+function equityMoveNature(natureId, offset) {
+    const order = equityNatures.map(function (nature) { return nature.id; });
+    const index = order.indexOf(natureId);
+    const target = index + offset;
+    if (index === -1 || target < 0 || target >= order.length) { return; }
+
+    order[index] = order[target];
+    order[target] = natureId;
+
+    equityNatureRequest(
+        '/equity/api/trade-natures/reorder',
+        { method: 'POST', body: JSON.stringify({ order: order }) },
+        'Trade nature order saved.'
+    );
+}
+
 document.addEventListener('DOMContentLoaded', function () {
+    equityLoadPreferences();
+    equityLoadNatures();
     {% if accounts %}
     equityLoadRates();
     {% endif %}

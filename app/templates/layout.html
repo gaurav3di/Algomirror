@@ -135,38 +135,34 @@
                     <div class="pt-4">
                         <h3 class="px-3 text-xs font-semibold text-base-content/50 uppercase tracking-wider">Trading</h3>
                         <div class="mt-2 space-y-1">
-                            <span aria-disabled="true" title="Coming soon" class="flex items-center space-x-3 px-3 py-2 rounded-lg opacity-50 cursor-not-allowed">
+                            <a href="{{ url_for('equity.watchlist') }}" class="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-base-300 transition-colors {{ 'bg-base-300' if request.endpoint == 'equity.watchlist' }}">
                                 <svg class="w-5 h-5 text-base-content/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
                                 </svg>
                                 <span>Watch List</span>
-                                <span class="badge badge-ghost badge-xs ml-auto">Soon</span>
-                            </span>
+                            </a>
 
-                            <span aria-disabled="true" title="Coming soon" class="flex items-center space-x-3 px-3 py-2 rounded-lg opacity-50 cursor-not-allowed">
+                            <a href="{{ url_for('equity.place_order') }}" class="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-base-300 transition-colors {{ 'bg-base-300' if request.endpoint == 'equity.place_order' }}">
                                 <svg class="w-5 h-5 text-base-content/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
                                 <span>Place Order</span>
-                                <span class="badge badge-ghost badge-xs ml-auto">Soon</span>
-                            </span>
+                            </a>
 
-                            <span aria-disabled="true" title="Coming soon" class="flex items-center space-x-3 px-3 py-2 rounded-lg opacity-50 cursor-not-allowed">
+                            <a href="{{ url_for('equity.order_book') }}" class="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-base-300 transition-colors {{ 'bg-base-300' if request.endpoint == 'equity.order_book' }}">
                                 <svg class="w-5 h-5 text-base-content/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
                                 </svg>
                                 <span>Order Book</span>
-                                <span class="badge badge-ghost badge-xs ml-auto">Soon</span>
-                            </span>
+                            </a>
 
-                            <span aria-disabled="true" title="Coming soon" class="flex items-center space-x-3 px-3 py-2 rounded-lg opacity-50 cursor-not-allowed">
+                            <a href="{{ url_for('equity.trade_book') }}" class="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-base-300 transition-colors {{ 'bg-base-300' if request.endpoint == 'equity.trade_book' }}">
                                 <svg class="w-5 h-5 text-base-content/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
                                 </svg>
                                 <span>Trade Book</span>
-                                <span class="badge badge-ghost badge-xs ml-auto">Soon</span>
-                            </span>
+                            </a>
 
                             <a href="{{ url_for('equity.holdings') }}" class="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-base-300 transition-colors {{ 'bg-base-300' if request.endpoint == 'equity.holdings' }}">
                                 <svg class="w-5 h-5 text-base-content/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">

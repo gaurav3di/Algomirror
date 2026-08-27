@@ -1,0 +1,1303 @@
+{% extends "layout.html" %}
+
+{% block title %}Equity Watch List - AlgoMirror{% endblock %}
+
+{% block page_title %}Equity Watch List{% endblock %}
+
+{% block content %}
+<style>
+    /* Tabular numerals for every column of aligned digits on this screen. The
+       compiled stylesheet only carries a dark-theme monospace helper, so the
+       rule is stated here so it applies in both themes. */
+    .equity-num { font-variant-numeric: tabular-nums; }
+
+    /* The symbol search results float over the form below them. */
+    .equity-search-wrap { position: relative; }
+    .equity-search-results {
+        position: absolute;
+        z-index: 40;
+        left: 0;
+        right: 0;
+        top: 100%;
+        max-height: 18rem;
+        overflow-y: auto;
+    }
+</style>
+
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h1 class="text-3xl font-bold">Watch List</h1>
+            <p class="text-base-content/70 mt-1">
+                Stocks under watch with a live price, the variance against your target and an optional price alert.
+                Nothing on this screen places an order.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            <span class="text-xs text-base-content/50 equity-num" id="equity-feed-marker"></span>
+            <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
+            <button onclick="equityLoadWatchlist()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">Refresh</button>
+            {% if accounts %}
+            <button onclick="equityToggleAddCard()" class="btn btn-primary btn-sm h-9" id="equity-add-toggle-btn">Add Stock</button>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Stale marker. Shown instead of blanking the page when a poll fails. -->
+    <div class="alert alert-warning hidden" id="equity-stale-banner">
+        <span id="equity-stale-text"></span>
+    </div>
+
+    <!-- Result of the last write. -->
+    <div class="alert hidden" id="equity-result-banner">
+        <span id="equity-result-text"></span>
+    </div>
+
+    {% if accounts %}
+    <!-- Price alerts that fired while this screen was open. -->
+    <div class="card bg-base-100 shadow hidden" id="equity-alerts-card">
+        <div class="card-body p-4">
+            <div class="flex justify-between items-center gap-3 flex-wrap">
+                <h2 class="card-title text-base">Price Alerts</h2>
+                <button onclick="equityClearAlerts()" class="btn btn-ghost btn-xs">Clear</button>
+            </div>
+            <ul class="space-y-1 text-sm" id="equity-alerts-list"></ul>
+            <p class="text-xs text-base-content/60">
+                A price alert is a notification only. It fires while this screen is polling, and it fires once per
+                armed level. Editing the alert price or the direction re-arms it.
+            </p>
+        </div>
+    </div>
+
+    <!-- Add stock -->
+    <div class="card bg-base-100 shadow-xl hidden" id="equity-add-card">
+        <div class="card-body">
+            <h2 class="card-title">Add Stock</h2>
+            <p class="text-sm text-base-content/60">
+                Search NSE and BSE for an equity or an ETF. Derivatives and indices are not offered: this module
+                trades CNC delivery only.
+            </p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div class="form-control equity-search-wrap md:col-span-2 lg:col-span-1">
+                    <label class="label" for="equity-add-search">
+                        <span class="label-text">Stock</span>
+                    </label>
+                    <input type="text"
+                           id="equity-add-search"
+                           class="input input-bordered input-sm"
+                           placeholder="Type at least two characters"
+                           autocomplete="off"
+                           oninput="equitySearchInput()">
+                    <ul class="menu bg-base-200 rounded-box shadow-lg equity-search-results hidden"
+                        id="equity-search-results"></ul>
+                    <label class="label">
+                        <span class="label-text-alt" id="equity-add-selected">No stock selected</span>
+                    </label>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-add-exchange">
+                        <span class="label-text">Exchange</span>
+                    </label>
+                    <select id="equity-add-exchange" class="select select-bordered select-sm">
+                        <option value="NSE" selected>NSE</option>
+                        <option value="BSE">BSE</option>
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-add-nature">
+                        <span class="label-text">Trade Nature</span>
+                    </label>
+                    <select id="equity-add-nature" class="select select-bordered select-sm">
+                        <option value="">Not set</option>
+                        {% for nature in trade_natures %}
+                        <option value="{{ nature.id }}">{{ nature.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-add-target">
+                        <span class="label-text">Target Price (₹)</span>
+                    </label>
+                    <input type="number" id="equity-add-target" class="input input-bordered input-sm equity-num"
+                           min="0" step="0.05" placeholder="Optional">
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-add-alert-price">
+                        <span class="label-text">Alert Price (₹, optional)</span>
+                    </label>
+                    <input type="number" id="equity-add-alert-price" class="input input-bordered input-sm equity-num"
+                           min="0" step="0.05" placeholder="Optional">
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-add-alert-direction">
+                        <span class="label-text">Alert When Price Is</span>
+                    </label>
+                    <select id="equity-add-alert-direction" class="select select-bordered select-sm">
+                        <option value="">Decide from the first live price</option>
+                        <option value="ABOVE">At or above the alert price</option>
+                        <option value="BELOW">At or below the alert price</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-4 flex-wrap mt-2">
+                <label class="label cursor-pointer gap-3">
+                    <input type="checkbox" id="equity-add-alert-enabled" class="toggle toggle-sm toggle-primary">
+                    <span class="label-text">Enable the price alert</span>
+                </label>
+                <button onclick="equityAddItem()" class="btn btn-primary btn-sm" id="equity-add-submit-btn">Add</button>
+                <button onclick="equityToggleAddCard(false)" class="btn btn-ghost btn-sm">Cancel</button>
+                <span class="text-xs text-base-content/60" id="equity-add-count"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Watch list table -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">My Watch List</h2>
+            <p class="text-sm text-base-content/60">
+                Prices refresh every 10 seconds from the shared push feed. Variance is the live price measured
+                against your target, so a stock below its target reads as negative.
+            </p>
+
+            <div class="overflow-x-auto">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Stock</th>
+                            <th>Trade Nature</th>
+                            <th class="text-right">Target Price</th>
+                            <th class="text-right">LTP</th>
+                            <th class="text-right">Change</th>
+                            <th class="text-right">Variance</th>
+                            <th>Price Alert</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="equity-watchlist-body">
+                        <tr>
+                            <td colspan="8" class="text-center py-8 text-base-content/60">
+                                Loading the watch list.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    {% else %}
+    <!-- No accounts at all -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body text-center py-16">
+            <h2 class="text-2xl font-bold mb-2">No Active Accounts</h2>
+            <p class="text-base-content/70 max-w-md mx-auto">
+                Add and connect a trading account before using the watch list. Live prices are read through a
+                connected account.
+            </p>
+            <div class="mt-6">
+                <a href="{{ url_for('accounts.add') }}" class="btn btn-primary">Add Account</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Edit one row -->
+<dialog id="equity-edit-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg" id="equity-edit-title">Edit Watch List Row</h3>
+
+        <div class="space-y-3 py-4">
+            <div class="form-control">
+                <label class="label" for="equity-edit-nature">
+                    <span class="label-text">Trade Nature</span>
+                </label>
+                <select id="equity-edit-nature" class="select select-bordered select-sm">
+                    <option value="">Not set</option>
+                    {% for nature in trade_natures %}
+                    <option value="{{ nature.id }}">{{ nature.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-control">
+                <label class="label" for="equity-edit-target">
+                    <span class="label-text">Target Price</span>
+                </label>
+                <input type="number" id="equity-edit-target" class="input input-bordered input-sm equity-num"
+                       min="0" step="0.05" placeholder="Leave blank to clear">
+            </div>
+
+            <div class="form-control">
+                <label class="label" for="equity-edit-alert-price">
+                    <span class="label-text">Alert Price</span>
+                </label>
+                <input type="number" id="equity-edit-alert-price" class="input input-bordered input-sm equity-num"
+                       min="0" step="0.05" placeholder="Leave blank to clear">
+            </div>
+
+            <div class="form-control">
+                <label class="label" for="equity-edit-alert-direction">
+                    <span class="label-text">Alert When Price Is</span>
+                </label>
+                <select id="equity-edit-alert-direction" class="select select-bordered select-sm">
+                    <option value="">Decide from the first live price</option>
+                    <option value="ABOVE">At or above the alert price</option>
+                    <option value="BELOW">At or below the alert price</option>
+                </select>
+            </div>
+
+            <label class="label cursor-pointer justify-start gap-3">
+                <input type="checkbox" id="equity-edit-alert-enabled" class="toggle toggle-sm toggle-primary">
+                <span class="label-text">Enable the price alert</span>
+            </label>
+
+            <p class="text-xs text-base-content/60">
+                Saving any alert field re-arms the alert, so a level that already fired can fire again.
+            </p>
+        </div>
+
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-sm">Cancel</button>
+            </form>
+            <button class="btn btn-primary btn-sm" id="equity-edit-save-btn" onclick="equitySaveEdit()">Save</button>
+        </div>
+    </div>
+</dialog>
+
+<!-- Remove one row -->
+<dialog id="equity-remove-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg">Remove From Watch List</h3>
+        <p class="py-4" id="equity-remove-text"></p>
+        <p class="text-sm text-base-content/60">
+            This only removes the row from the watch list. It does not touch any holding, order or price alert history.
+        </p>
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-sm">Cancel</button>
+            </form>
+            <button class="btn btn-error btn-sm" id="equity-remove-confirm-btn" onclick="equityConfirmRemove()">Delete</button>
+        </div>
+    </div>
+</dialog>
+
+<script>
+// ---------------------------------------------------------------------------
+// Equity Watch List (M3).
+//
+// Reads and writes AlgoMirror's own watch list only. Nothing here can place,
+// modify or cancel a broker order: the Buy and Sell row actions are plain
+// navigation to Place Order with the stock pre-filled.
+//
+// Prices refresh every 10 seconds from /equity/api/watchlist/quotes, which is
+// served by the shared push feed rather than by REST polling.
+// ---------------------------------------------------------------------------
+
+// One shared formatting helper for the whole screen so the rounding rules
+// cannot drift between the table cells and the alert lines.
+const EquityFormat = {
+    LAKH: 100000,
+
+    // Compact rupees for summary figures: the lakh suffix above one lakh
+    // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
+    compact: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '₹0'; }
+        const sign = num < 0 ? '-' : '';
+        const abs = Math.abs(num);
+        if (abs >= EquityFormat.LAKH) {
+            return sign + '₹' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+        }
+        return sign + '₹' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    },
+
+    // Plain Indian grouped rupees with paise, for the price columns.
+    rupees: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0.00'; }
+        const sign = num < 0 ? '-' : '';
+        return sign + '₹' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    },
+
+    // Bare grouped amount with paise, for the editable boxes where the rupee
+    // prefix would not fit.
+    amount: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return ''; }
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    },
+
+    // Percent to one decimal place, keeping a second decimal only where it
+    // carries information: 2.28, 10.0, 0.97, 4.98.
+    percent: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0.0'; }
+        let text = num.toFixed(2);
+        if (text.slice(-1) === '0') { text = text.slice(0, -1); }
+        return text + '%';
+    },
+
+    // Explicit plus sign on a gain. Losses already carry their minus sign.
+    signed: function (value, style) {
+        const num = Number(value) || 0;
+        const text = style === 'compact' ? EquityFormat.compact(num) : EquityFormat.rupees(num);
+        return num > 0 ? '+' + text : text;
+    },
+
+    signedPercent: function (value) {
+        const num = Number(value) || 0;
+        const text = EquityFormat.percent(num);
+        return num > 0 ? '+' + text : text;
+    },
+
+    pnlClass: function (value) {
+        const num = Number(value) || 0;
+        if (num > 0) { return 'text-success'; }
+        if (num < 0) { return 'text-error'; }
+        return '';
+    },
+
+    integer: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0'; }
+        return Math.round(num).toLocaleString('en-IN');
+    },
+
+    clockTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    }
+};
+
+// The PRD asks for a refresh about every 10 seconds.
+const EQUITY_POLL_MS = 10000;
+const EQUITY_FETCH_TIMEOUT_MS = 20000;
+const EQUITY_SEARCH_DEBOUNCE_MS = 350;
+const EQUITY_COLUMN_COUNT = 8;
+const EQUITY_MAX_ALERT_LINES = 20;
+const EQUITY_PLACE_ORDER_URL = '{{ url_for("equity.place_order") }}';
+
+let equityPollTimer = null;
+let equityLoading = false;
+let equityRenderedIds = '';
+let equitySearchTimer = null;
+let equitySearchController = null;
+let equitySelectedSearch = null;
+let equityEditItemId = null;
+let equityRemoveItemId = null;
+let equityAlertLines = [];
+
+// ---------------------------------------------------------------------------
+// Small shared helpers
+// ---------------------------------------------------------------------------
+
+function equitySetText(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) { return; }
+    el.textContent = text;
+    if (className !== undefined) {
+        el.className = className;
+    }
+}
+
+function equityShowBanner(bannerId, textId, message, kind) {
+    const banner = document.getElementById(bannerId);
+    const text = document.getElementById(textId);
+    if (!banner || !text) { return; }
+    if (!message) {
+        banner.classList.add('hidden');
+        return;
+    }
+    text.textContent = message;
+    banner.className = 'alert ' + (kind === 'error' ? 'alert-error' : (kind === 'warning' ? 'alert-warning' : 'alert-success'));
+}
+
+function equityShowStale(message) {
+    equityShowBanner('equity-stale-banner', 'equity-stale-text', message, 'warning');
+}
+
+function equityShowResult(message, kind) {
+    equityShowBanner('equity-result-banner', 'equity-result-text', message, kind);
+}
+
+function equityCell(text, className) {
+    const td = document.createElement('td');
+    if (className) { td.className = className; }
+    td.textContent = text === null || text === undefined ? '' : String(text);
+    return td;
+}
+
+function equityMessageRow(message) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = EQUITY_COLUMN_COUNT;
+    cell.className = 'text-center py-8 text-base-content/60';
+    cell.textContent = message;
+    row.appendChild(cell);
+    return row;
+}
+
+// A number input that was left blank means "clear this field". A blank is sent
+// as null, which the server reads as a clear rather than as a zero.
+function equityReadOptionalNumber(id) {
+    const el = document.getElementById(id);
+    if (!el) { return { ok: true, value: null }; }
+    const raw = (el.value || '').trim();
+    if (raw === '') { return { ok: true, value: null }; }
+    const value = parseFloat(raw);
+    if (!isFinite(value) || value <= 0) {
+        return { ok: false, value: null };
+    }
+    return { ok: true, value: value };
+}
+
+// ---------------------------------------------------------------------------
+// Symbol search
+// ---------------------------------------------------------------------------
+
+function equityCloseSearchResults() {
+    const list = document.getElementById('equity-search-results');
+    if (list) {
+        list.textContent = '';
+        list.classList.add('hidden');
+    }
+}
+
+function equitySearchInput() {
+    equitySelectedSearch = null;
+    equitySetText('equity-add-selected', 'No stock selected', 'label-text-alt');
+
+    if (equitySearchTimer) { clearTimeout(equitySearchTimer); }
+    equitySearchTimer = setTimeout(equityRunSearch, EQUITY_SEARCH_DEBOUNCE_MS);
+}
+
+async function equityRunSearch() {
+    const input = document.getElementById('equity-add-search');
+    const list = document.getElementById('equity-search-results');
+    if (!input || !list) { return; }
+
+    const query = (input.value || '').trim();
+    if (query.length < 2) {
+        equityCloseSearchResults();
+        return;
+    }
+
+    // Only the newest search is allowed to write the list.
+    if (equitySearchController) { equitySearchController.abort(); }
+    equitySearchController = new AbortController();
+
+    const exchangeEl = document.getElementById('equity-add-exchange');
+    const exchange = exchangeEl ? exchangeEl.value : '';
+
+    try {
+        const response = await fetch(
+            '/equity/api/symbol-search?q=' + encodeURIComponent(query) +
+            '&exchange=' + encodeURIComponent(exchange),
+            { signal: equitySearchController.signal }
+        );
+        const data = await response.json();
+
+        list.textContent = '';
+        if (data.status !== 'success' || !(data.results || []).length) {
+            const item = document.createElement('li');
+            const text = document.createElement('span');
+            text.className = 'text-sm text-base-content/60';
+            text.textContent = data.status === 'success'
+                ? 'No NSE or BSE equity or ETF matched that search.'
+                : (data.message || 'Symbol search is unavailable right now.');
+            item.appendChild(text);
+            list.appendChild(item);
+            list.classList.remove('hidden');
+            return;
+        }
+
+        data.results.forEach(function (result) {
+            const item = document.createElement('li');
+            const button = document.createElement('a');
+            button.href = '#';
+            button.onclick = function (event) {
+                event.preventDefault();
+                equityPickSearchResult(result);
+            };
+
+            const symbol = document.createElement('span');
+            symbol.className = 'font-semibold';
+            symbol.textContent = result.symbol;
+            button.appendChild(symbol);
+
+            const meta = document.createElement('span');
+            meta.className = 'text-xs text-base-content/60';
+            meta.textContent = result.exchange + (result.name ? ' ' + result.name : '');
+            button.appendChild(meta);
+
+            item.appendChild(button);
+            list.appendChild(item);
+        });
+        list.classList.remove('hidden');
+    } catch (error) {
+        if (error && error.name === 'AbortError') { return; }
+        console.error('Equity symbol search failed:', error);
+        equityCloseSearchResults();
+    }
+}
+
+function equityPickSearchResult(result) {
+    equitySelectedSearch = result;
+
+    const input = document.getElementById('equity-add-search');
+    if (input) { input.value = result.symbol; }
+
+    const exchangeEl = document.getElementById('equity-add-exchange');
+    if (exchangeEl && result.exchange) { exchangeEl.value = result.exchange; }
+
+    equitySetText(
+        'equity-add-selected',
+        result.symbol + ' on ' + result.exchange + (result.name ? ', ' + result.name : ''),
+        'label-text-alt text-success'
+    );
+    equityCloseSearchResults();
+}
+
+// ---------------------------------------------------------------------------
+// Add
+// ---------------------------------------------------------------------------
+
+function equityToggleAddCard(force) {
+    const card = document.getElementById('equity-add-card');
+    if (!card) { return; }
+    const show = force === undefined ? card.classList.contains('hidden') : Boolean(force);
+    card.classList.toggle('hidden', !show);
+    if (show) {
+        const input = document.getElementById('equity-add-search');
+        if (input) { input.focus(); }
+    } else {
+        equityCloseSearchResults();
+    }
+}
+
+async function equityAddItem() {
+    const input = document.getElementById('equity-add-search');
+    const exchangeEl = document.getElementById('equity-add-exchange');
+    const symbol = ((input ? input.value : '') || '').trim().toUpperCase();
+
+    if (symbol.length < 1) {
+        equityShowResult('Search for a stock and pick it from the list before adding it.', 'error');
+        return;
+    }
+
+    const target = equityReadOptionalNumber('equity-add-target');
+    if (!target.ok) {
+        equityShowResult('The target price must be a positive number, or blank.', 'error');
+        return;
+    }
+    const alertPrice = equityReadOptionalNumber('equity-add-alert-price');
+    if (!alertPrice.ok) {
+        equityShowResult('The alert price must be a positive number, or blank.', 'error');
+        return;
+    }
+
+    const enabledEl = document.getElementById('equity-add-alert-enabled');
+    const enabled = enabledEl ? enabledEl.checked : false;
+    if (enabled && alertPrice.value === null) {
+        equityShowResult('A price alert needs an alert price.', 'error');
+        return;
+    }
+
+    const natureEl = document.getElementById('equity-add-nature');
+    const directionEl = document.getElementById('equity-add-alert-direction');
+
+    const body = {
+        symbol: symbol,
+        exchange: exchangeEl ? exchangeEl.value : 'NSE',
+        trade_nature_id: natureEl && natureEl.value ? parseInt(natureEl.value, 10) : null,
+        target_price: target.value,
+        alert_price: alertPrice.value,
+        alert_direction: directionEl && directionEl.value ? directionEl.value : null,
+        price_alert_enabled: enabled
+    };
+
+    const button = document.getElementById('equity-add-submit-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/watchlist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The stock could not be added.', 'error');
+            return;
+        }
+
+        equityApplyPayload(data, true);
+        equityShowResult(data.message || (symbol + ' added to the watch list.'), 'success');
+        equityResetAddForm();
+        equityToggleAddCard(false);
+    } catch (error) {
+        equityShowResult('The stock could not be added. Check the connection and try again.', 'error');
+        console.error('Equity watch list add failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+function equityResetAddForm() {
+    ['equity-add-search', 'equity-add-target', 'equity-add-alert-price'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) { el.value = ''; }
+    });
+    const direction = document.getElementById('equity-add-alert-direction');
+    if (direction) { direction.value = ''; }
+    const enabled = document.getElementById('equity-add-alert-enabled');
+    if (enabled) { enabled.checked = false; }
+    equitySelectedSearch = null;
+    equitySetText('equity-add-selected', 'No stock selected', 'label-text-alt');
+    equityCloseSearchResults();
+}
+
+// ---------------------------------------------------------------------------
+// Update and remove
+// ---------------------------------------------------------------------------
+
+async function equityUpdateItem(itemId, body, successMessage) {
+    try {
+        const response = await fetchWithCSRF('/equity/api/watchlist/' + itemId, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The watch list row could not be saved.', 'error');
+            // Re-read so the controls show what the server actually holds.
+            equityLoadWatchlist(true);
+            return false;
+        }
+
+        equityApplyPayload(data, true);
+        equityShowResult(successMessage || data.message || 'Saved.', 'success');
+        return true;
+    } catch (error) {
+        equityShowResult('The watch list row could not be saved. Check the connection and try again.', 'error');
+        console.error('Equity watch list update failed:', error);
+        equityLoadWatchlist(true);
+        return false;
+    }
+}
+
+function equityNatureChanged(itemId, select) {
+    const value = select.value ? parseInt(select.value, 10) : null;
+    equityUpdateItem(itemId, { trade_nature_id: value }, 'Trade nature saved.');
+}
+
+function equityTargetChanged(itemId, input) {
+    const raw = (input.value || '').trim();
+    if (raw === '') {
+        equityUpdateItem(itemId, { target_price: null }, 'Target price cleared.');
+        return;
+    }
+    const value = parseFloat(raw);
+    if (!isFinite(value) || value <= 0) {
+        equityShowResult('The target price must be a positive number, or blank.', 'error');
+        equityLoadWatchlist(true);
+        return;
+    }
+    equityUpdateItem(itemId, { target_price: value }, 'Target price saved.');
+}
+
+function equityAlertToggled(itemId, checkbox, hasAlertPrice) {
+    if (checkbox.checked && !hasAlertPrice) {
+        // The server refuses this, so it is refused here with the fix offered
+        // rather than bounced back as an error.
+        checkbox.checked = false;
+        equityShowResult('A price alert needs an alert price. Set one in Edit first.', 'error');
+        equityOpenEdit(itemId);
+        return;
+    }
+    equityUpdateItem(
+        itemId,
+        { price_alert_enabled: checkbox.checked },
+        checkbox.checked ? 'Price alert enabled and armed.' : 'Price alert disabled.'
+    );
+}
+
+function equityOpenEdit(itemId) {
+    const item = equityItemById(itemId);
+    if (!item) { return; }
+
+    equityEditItemId = itemId;
+    equitySetText('equity-edit-title', 'Edit ' + item.symbol + ' (' + item.exchange + ')');
+
+    const nature = document.getElementById('equity-edit-nature');
+    if (nature) { nature.value = item.trade_nature_id ? String(item.trade_nature_id) : ''; }
+
+    const target = document.getElementById('equity-edit-target');
+    if (target) { target.value = item.target_price === null || item.target_price === undefined ? '' : item.target_price; }
+
+    const alertPrice = document.getElementById('equity-edit-alert-price');
+    if (alertPrice) { alertPrice.value = item.alert_price === null || item.alert_price === undefined ? '' : item.alert_price; }
+
+    const direction = document.getElementById('equity-edit-alert-direction');
+    if (direction) { direction.value = item.alert_direction || ''; }
+
+    const enabled = document.getElementById('equity-edit-alert-enabled');
+    if (enabled) { enabled.checked = Boolean(item.price_alert_enabled); }
+
+    const modal = document.getElementById('equity-edit-modal');
+    if (modal) { modal.showModal(); }
+}
+
+async function equitySaveEdit() {
+    if (!equityEditItemId) { return; }
+
+    const target = equityReadOptionalNumber('equity-edit-target');
+    if (!target.ok) {
+        equityShowResult('The target price must be a positive number, or blank.', 'error');
+        return;
+    }
+    const alertPrice = equityReadOptionalNumber('equity-edit-alert-price');
+    if (!alertPrice.ok) {
+        equityShowResult('The alert price must be a positive number, or blank.', 'error');
+        return;
+    }
+
+    const enabledEl = document.getElementById('equity-edit-alert-enabled');
+    const enabled = enabledEl ? enabledEl.checked : false;
+    if (enabled && alertPrice.value === null) {
+        equityShowResult('A price alert needs an alert price.', 'error');
+        return;
+    }
+
+    const natureEl = document.getElementById('equity-edit-nature');
+    const directionEl = document.getElementById('equity-edit-alert-direction');
+
+    const body = {
+        trade_nature_id: natureEl && natureEl.value ? parseInt(natureEl.value, 10) : null,
+        target_price: target.value,
+        alert_price: alertPrice.value,
+        alert_direction: directionEl && directionEl.value ? directionEl.value : null,
+        price_alert_enabled: enabled,
+        rearm_alert: true
+    };
+
+    const button = document.getElementById('equity-edit-save-btn');
+    if (button) { button.disabled = true; }
+
+    const itemId = equityEditItemId;
+    try {
+        const saved = await equityUpdateItem(itemId, body, 'Watch list row saved and the alert re-armed.');
+        if (saved) {
+            const modal = document.getElementById('equity-edit-modal');
+            if (modal) { modal.close(); }
+            equityEditItemId = null;
+        }
+    } finally {
+        if (button) { button.disabled = false; }
+    }
+}
+
+function equityOpenRemove(itemId) {
+    const item = equityItemById(itemId);
+    if (!item) { return; }
+    equityRemoveItemId = itemId;
+    equitySetText('equity-remove-text', 'Remove ' + item.symbol + ' (' + item.exchange + ') from the watch list?');
+    const modal = document.getElementById('equity-remove-modal');
+    if (modal) { modal.showModal(); }
+}
+
+async function equityConfirmRemove() {
+    if (!equityRemoveItemId) { return; }
+    const itemId = equityRemoveItemId;
+
+    const button = document.getElementById('equity-remove-confirm-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/watchlist/' + itemId, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The stock could not be removed.', 'error');
+            return;
+        }
+
+        equityApplyPayload(data, true);
+        equityShowResult(data.message || 'Removed from the watch list.', 'success');
+    } catch (error) {
+        equityShowResult('The stock could not be removed. Check the connection and try again.', 'error');
+        console.error('Equity watch list remove failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+        equityRemoveItemId = null;
+        const modal = document.getElementById('equity-remove-modal');
+        if (modal) { modal.close(); }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row rendering
+//
+// Every cell is written with textContent or through a form control's value, so
+// a broker supplied symbol can never be treated as markup.
+// ---------------------------------------------------------------------------
+
+let equityItems = [];
+
+function equityItemById(itemId) {
+    for (let index = 0; index < equityItems.length; index++) {
+        if (equityItems[index].id === itemId) { return equityItems[index]; }
+    }
+    return null;
+}
+
+function equitySymbolCell(item) {
+    const td = document.createElement('td');
+
+    const symbol = document.createElement('div');
+    symbol.className = 'font-semibold';
+    symbol.textContent = item.symbol;
+    td.appendChild(symbol);
+
+    const meta = document.createElement('div');
+    meta.className = 'text-xs text-base-content/50';
+    meta.textContent = item.exchange || '';
+    td.appendChild(meta);
+
+    return td;
+}
+
+function equityNatureCell(item) {
+    const td = document.createElement('td');
+
+    const select = document.createElement('select');
+    select.className = 'select select-bordered select-xs w-32';
+    select.setAttribute('aria-label', 'Trade nature for ' + item.symbol);
+
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Not set';
+    select.appendChild(blank);
+
+    {% for nature in trade_natures %}
+    (function () {
+        const option = document.createElement('option');
+        option.value = '{{ nature.id }}';
+        option.textContent = {{ nature.name | tojson }};
+        select.appendChild(option);
+    })();
+    {% endfor %}
+
+    // A nature that has since been deactivated still has to be shown, or the
+    // dropdown would silently look like the row has no nature at all.
+    if (item.trade_nature_id && !select.querySelector('option[value="' + item.trade_nature_id + '"]')) {
+        const option = document.createElement('option');
+        option.value = String(item.trade_nature_id);
+        option.textContent = (item.trade_nature || 'Trade nature ' + item.trade_nature_id) + ' (inactive)';
+        select.appendChild(option);
+    }
+
+    select.value = item.trade_nature_id ? String(item.trade_nature_id) : '';
+    select.onchange = function () { equityNatureChanged(item.id, select); };
+
+    td.appendChild(select);
+    return td;
+}
+
+function equityTargetCell(item) {
+    const td = document.createElement('td');
+    td.className = 'text-right';
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.step = '0.05';
+    input.className = 'input input-bordered input-xs w-28 text-right equity-num';
+    input.placeholder = 'Not set';
+    input.value = item.target_price === null || item.target_price === undefined ? '' : item.target_price;
+    input.setAttribute('aria-label', 'Target price for ' + item.symbol);
+    input.onchange = function () { equityTargetChanged(item.id, input); };
+
+    td.appendChild(input);
+    return td;
+}
+
+function equityAlertCell(item) {
+    const td = document.createElement('td');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center gap-2';
+
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.className = 'toggle toggle-xs toggle-primary';
+    toggle.checked = Boolean(item.price_alert_enabled);
+    toggle.setAttribute('aria-label', 'Price alert for ' + item.symbol);
+    const hasAlertPrice = item.alert_price !== null && item.alert_price !== undefined;
+    toggle.onchange = function () { equityAlertToggled(item.id, toggle, hasAlertPrice); };
+    wrapper.appendChild(toggle);
+
+    const label = document.createElement('span');
+    label.className = 'text-xs equity-num';
+    if (!hasAlertPrice) {
+        label.textContent = 'No alert price';
+        label.className = 'text-xs text-base-content/50';
+    } else {
+        const direction = item.alert_direction === 'ABOVE'
+            ? 'at or above'
+            : (item.alert_direction === 'BELOW' ? 'at or below' : 'direction pending');
+        label.textContent = direction + ' ' + EquityFormat.rupees(item.alert_price);
+    }
+    wrapper.appendChild(label);
+
+    td.appendChild(wrapper);
+
+    const state = document.createElement('div');
+    state.className = 'text-xs';
+    state.id = 'equity-alert-state-' + item.id;
+    equityWriteAlertState(state, item);
+    td.appendChild(state);
+
+    return td;
+}
+
+function equityWriteAlertState(el, item) {
+    if (!el) { return; }
+    if (!item.price_alert_enabled) {
+        el.textContent = 'Off';
+        el.className = 'text-xs text-base-content/50';
+        return;
+    }
+    if (item.alert_triggered_at) {
+        el.textContent = 'Fired at ' + EquityFormat.clockTime(item.alert_triggered_at) +
+            (item.alert_triggered_price ? ' on ' + EquityFormat.rupees(item.alert_triggered_price) : '') +
+            '. Edit to re-arm.';
+        el.className = 'text-xs text-warning';
+        return;
+    }
+    if (item.alert_armed) {
+        el.textContent = 'Armed';
+        el.className = 'text-xs text-success';
+        return;
+    }
+    el.textContent = 'Not armed';
+    el.className = 'text-xs text-base-content/50';
+}
+
+function equityActionsCell(item) {
+    const td = document.createElement('td');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center gap-1 flex-wrap';
+
+    const buy = document.createElement('a');
+    buy.className = 'btn btn-xs btn-success';
+    buy.textContent = 'Buy';
+    buy.href = equityPlaceOrderUrl(item, 'BUY');
+    buy.title = 'Open Place Order with ' + item.symbol + ' pre-filled to buy';
+    wrapper.appendChild(buy);
+
+    const sell = document.createElement('a');
+    sell.className = 'btn btn-xs btn-error';
+    sell.textContent = 'Sell';
+    sell.href = equityPlaceOrderUrl(item, 'SELL');
+    sell.title = 'Open Place Order with ' + item.symbol + ' pre-filled to sell';
+    wrapper.appendChild(sell);
+
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'btn btn-xs btn-outline';
+    edit.textContent = 'Edit';
+    edit.onclick = function () { equityOpenEdit(item.id); };
+    wrapper.appendChild(edit);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    // The approved mockup shows this action as Delete, in red.
+    remove.className = 'btn btn-xs btn-ghost text-error';
+    remove.textContent = 'Delete';
+    remove.onclick = function () { equityOpenRemove(item.id); };
+    wrapper.appendChild(remove);
+
+    td.appendChild(wrapper);
+    return td;
+}
+
+// Buy and Sell are pure navigation: they open Place Order with the stock
+// pre-filled and place nothing on their own.
+function equityPlaceOrderUrl(item, side) {
+    const params = new URLSearchParams();
+    params.set('symbol', item.symbol);
+    params.set('exchange', item.exchange || 'NSE');
+    params.set('side', side);
+    if (item.trade_nature_id) { params.set('trade_nature_id', String(item.trade_nature_id)); }
+    return EQUITY_PLACE_ORDER_URL + '?' + params.toString();
+}
+
+function equityWatchRow(item) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover';
+    tr.id = 'equity-row-' + item.id;
+
+    tr.appendChild(equitySymbolCell(item));
+    tr.appendChild(equityNatureCell(item));
+    tr.appendChild(equityTargetCell(item));
+
+    const ltp = equityCell('', 'text-right equity-num font-semibold');
+    ltp.id = 'equity-ltp-' + item.id;
+    tr.appendChild(ltp);
+
+    const change = equityCell('', 'text-right equity-num');
+    change.id = 'equity-change-' + item.id;
+    tr.appendChild(change);
+
+    const variance = equityCell('', 'text-right equity-num');
+    variance.id = 'equity-variance-' + item.id;
+    tr.appendChild(variance);
+
+    tr.appendChild(equityAlertCell(item));
+    tr.appendChild(equityActionsCell(item));
+
+    // The price cells are filled once the row is in the document: they are
+    // written by id, and an element that has not been appended yet cannot be
+    // found by one.
+    return tr;
+}
+
+// The 10 second poll writes only these cells, so an edit in progress in the
+// same row is never overwritten under the admin's hands.
+function equityWriteLiveCells(item) {
+    const ltp = document.getElementById('equity-ltp-' + item.id);
+    if (ltp) {
+        ltp.textContent = item.has_ltp ? EquityFormat.rupees(item.ltp) : 'No price yet';
+        ltp.className = item.has_ltp
+            ? 'text-right equity-num font-semibold'
+            : 'text-right equity-num text-base-content/50';
+    }
+
+    const change = document.getElementById('equity-change-' + item.id);
+    if (change) {
+        if (item.has_ltp && item.prev_close) {
+            change.textContent = EquityFormat.signed(item.change) + ' (' + EquityFormat.signedPercent(item.change_pct) + ')';
+            change.className = ('text-right equity-num ' + EquityFormat.pnlClass(item.change)).trim();
+        } else {
+            change.textContent = '-';
+            change.className = 'text-right equity-num text-base-content/50';
+        }
+    }
+
+    const variance = document.getElementById('equity-variance-' + item.id);
+    if (variance) {
+        if (item.has_variance) {
+            variance.textContent = EquityFormat.signedPercent(item.variance_pct) + ' (' + EquityFormat.signed(item.variance) + ')';
+            variance.className = ('text-right equity-num ' + EquityFormat.pnlClass(item.variance)).trim();
+        } else {
+            variance.textContent = item.target_price ? 'No price yet' : 'No target set';
+            variance.className = 'text-right equity-num text-base-content/50';
+        }
+    }
+
+    equityWriteAlertState(document.getElementById('equity-alert-state-' + item.id), item);
+}
+
+function equityRenderTable(items, force) {
+    const body = document.getElementById('equity-watchlist-body');
+    if (!body) { return; }
+
+    const ids = items.map(function (item) { return item.id; }).join(',');
+
+    if (!force && ids === equityRenderedIds) {
+        // Same rows as last time, so only the live cells are rewritten. The
+        // trade nature select and the target price box keep whatever the admin
+        // is part way through typing.
+        items.forEach(equityWriteLiveCells);
+        return;
+    }
+
+    // A rebuild would discard an edit in progress, so it waits for the box to
+    // lose focus rather than overwriting it.
+    const active = document.activeElement;
+    if (!force && active && body.contains(active)) {
+        items.forEach(equityWriteLiveCells);
+        return;
+    }
+
+    body.textContent = '';
+    equityRenderedIds = ids;
+
+    if (!items.length) {
+        body.appendChild(equityMessageRow(
+            'No stocks under watch. Use Add Stock to search NSE or BSE and start watching one.'
+        ));
+        return;
+    }
+
+    items.forEach(function (item) {
+        body.appendChild(equityWatchRow(item));
+    });
+    items.forEach(equityWriteLiveCells);
+}
+
+// ---------------------------------------------------------------------------
+// Alerts
+// ---------------------------------------------------------------------------
+
+function equityRecordAlerts(alerts) {
+    if (!alerts || !alerts.length) { return; }
+
+    alerts.forEach(function (alert) {
+        equityAlertLines.unshift({
+            text: alert.message,
+            at: alert.triggered_at
+        });
+        if (typeof showToast === 'function') {
+            showToast(alert.message, 'warning');
+        }
+    });
+    equityAlertLines = equityAlertLines.slice(0, EQUITY_MAX_ALERT_LINES);
+    equityRenderAlerts();
+}
+
+function equityRenderAlerts() {
+    const card = document.getElementById('equity-alerts-card');
+    const list = document.getElementById('equity-alerts-list');
+    if (!card || !list) { return; }
+
+    list.textContent = '';
+    if (!equityAlertLines.length) {
+        card.classList.add('hidden');
+        return;
+    }
+
+    equityAlertLines.forEach(function (line) {
+        const item = document.createElement('li');
+        item.className = 'flex gap-3';
+
+        const time = document.createElement('span');
+        time.className = 'text-xs text-base-content/60 equity-num shrink-0';
+        time.textContent = EquityFormat.clockTime(line.at);
+        item.appendChild(time);
+
+        const text = document.createElement('span');
+        text.textContent = line.text;
+        item.appendChild(text);
+
+        list.appendChild(item);
+    });
+    card.classList.remove('hidden');
+}
+
+function equityClearAlerts() {
+    equityAlertLines = [];
+    equityRenderAlerts();
+}
+
+// ---------------------------------------------------------------------------
+// Load
+// ---------------------------------------------------------------------------
+
+function equityApplyPayload(payload, force) {
+    equityItems = payload.items || [];
+    equityRenderTable(equityItems, force);
+    equityRecordAlerts(payload.alerts);
+
+    equitySetText(
+        'equity-add-count',
+        equityItems.length + ' of ' + (payload.max_items || 100) + ' stocks used'
+    );
+
+    if (payload.price_alerts_enabled === false) {
+        equityShowStale(
+            'Price alerts are switched off in Equity Settings, so no alert will fire even where one is armed.'
+        );
+    } else {
+        equityShowStale('');
+    }
+
+    const feed = payload.price_feed || {};
+    equitySetText(
+        'equity-feed-marker',
+        feed.source === 'websocket' ? 'Prices: live feed'
+            : (feed.source === 'mixed' ? 'Prices: feed and fallback'
+                : (feed.source === 'rest' ? 'Prices: fallback quotes' : 'Prices: none yet'))
+    );
+
+    equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(payload.generated_at));
+}
+
+async function equityLoadWatchlist(force) {
+    if (equityLoading) { return; }
+    equityLoading = true;
+
+    const button = document.getElementById('equity-refresh-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetch('/equity/api/watchlist/quotes?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowStale('Live prices unavailable, showing the last values loaded. ' + (data.message || ''));
+            return;
+        }
+
+        equityApplyPayload(data, Boolean(force));
+    } catch (error) {
+        // Degrade to a visible stale marker, never blank the page.
+        equityShowStale('Live prices unavailable, showing the last values loaded. Retrying shortly.');
+        console.error('Equity watch list load failed:', error);
+    } finally {
+        equityLoading = false;
+        if (button) { button.disabled = false; }
+    }
+}
+
+document.addEventListener('click', function (event) {
+    const wrap = document.querySelector('.equity-search-wrap');
+    if (wrap && !wrap.contains(event.target)) {
+        equityCloseSearchResults();
+    }
+});
+
+document.addEventListener('DOMContentLoaded', function () {
+    {% if accounts %}
+    equityLoadWatchlist(true);
+    equityPollTimer = setInterval(equityLoadWatchlist, EQUITY_POLL_MS);
+    {% endif %}
+});
+
+window.addEventListener('beforeunload', function () {
+    if (equityPollTimer) {
+        clearInterval(equityPollTimer);
+        equityPollTimer = null;
+    }
+});
+</script>
+{% endblock %}

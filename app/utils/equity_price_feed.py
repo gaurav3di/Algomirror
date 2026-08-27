@@ -321,7 +321,9 @@ class EquityPriceFeed:
         cached = self._manager_ltp(manager)
         upper_index: Optional[Dict[str, object]] = None
 
-        cutoff = _utcnow() - timedelta(seconds=MAX_PRICE_AGE_SECONDS)
+        # Timezone aware to match how _price_times is written in _on_ltp_tick.
+        # Comparing a naive datetime against an aware one raises TypeError.
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=MAX_PRICE_AGE_SECONDS)
         with self._lock:
             local = {}
             for key in keys:
@@ -336,6 +338,18 @@ class EquityPriceFeed:
         prices: Dict[SymbolKey, float] = {}
         for key in keys:
             symbol, exchange = key
+
+            # The age gate applies to EVERY source, not only the local cache.
+            # ProfessionalWebSocketManager.get_ltp serves its last valid value
+            # indefinitely by design (zero-value protection), so consulting it
+            # without an age check would reintroduce the exact failure the tick
+            # times exist to prevent: a dead subscription showing a frozen price
+            # as a live one. A symbol is served only when THIS feed has seen a
+            # recent tick for it; anything else is reported absent so the
+            # caller's bounded REST backstop refreshes it.
+            if local.get(key, 0.0) <= 0:
+                continue
+
             price = _to_price(cached.get(f"{exchange}:{symbol}"))
 
             if price <= 0 and cached:

@@ -1,0 +1,729 @@
+{% extends "layout.html" %}
+
+{% block title %}Equity Trade Book - AlgoMirror{% endblock %}
+
+{% block page_title %}Equity Trade Book{% endblock %}
+
+{% block content %}
+<style>
+    /* Tabular numerals for every column of aligned digits on this screen. The
+       compiled stylesheet only carries a dark-theme monospace helper, so the
+       rule is stated here so it applies in both themes. */
+    .equity-num { font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+            <h1 class="text-3xl font-bold">Trade Book</h1>
+            <p class="text-base-content/70 mt-1">
+                One row per fill, with its execution price and the account it filled in. Every fill links back to the
+                order it came from. This screen is read-only.
+            </p>
+        </div>
+        <div class="flex gap-3 items-center flex-wrap">
+            <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
+            <button onclick="equityLoadTradeBook()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">Refresh</button>
+            <a href="{{ url_for('equity.order_book') }}" class="btn btn-primary btn-sm h-9">Order Book</a>
+        </div>
+    </div>
+
+    <!-- Stale marker. Shown instead of blanking the page when a load fails. -->
+    <div class="alert alert-warning hidden" id="equity-stale-banner">
+        <span id="equity-stale-text"></span>
+    </div>
+
+    <!-- Filters -->
+    <div class="card bg-base-100 shadow">
+        <div class="card-body p-4">
+            <div class="flex items-end flex-wrap gap-4">
+                <div class="form-control">
+                    <label class="label" for="equity-filter-account">
+                        <span class="label-text">Account</span>
+                    </label>
+                    <select id="equity-filter-account" class="select select-bordered select-sm" onchange="equityLoadTradeBook()">
+                        <option value="all" selected>All Accounts</option>
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-symbol">
+                        <span class="label-text">Stock</span>
+                    </label>
+                    <input type="text" id="equity-filter-symbol" class="input input-bordered input-sm w-36"
+                           placeholder="All" onchange="equityLoadTradeBook()">
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-side">
+                        <span class="label-text">Side</span>
+                    </label>
+                    <select id="equity-filter-side" class="select select-bordered select-sm" onchange="equityLoadTradeBook()">
+                        <option value="all" selected>All</option>
+                        <option value="BUY">BUY</option>
+                        <option value="SELL">SELL</option>
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-status">
+                        <span class="label-text">Order Status</span>
+                    </label>
+                    <select id="equity-filter-status" class="select select-bordered select-sm" onchange="equityLoadTradeBook()">
+                        <option value="all" selected>All</option>
+                        <option value="PENDING">PENDING</option>
+                        <option value="PARTIAL">PARTIAL</option>
+                        <option value="COMPLETED">COMPLETED</option>
+                        <option value="CANCELLED">CANCELLED</option>
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-type">
+                        <span class="label-text">Order Type</span>
+                    </label>
+                    <select id="equity-filter-type" class="select select-bordered select-sm" onchange="equityLoadTradeBook()">
+                        <option value="all" selected>All</option>
+                        <option value="MARKET">MARKET</option>
+                        <option value="LIMIT">LIMIT</option>
+                        <option value="GTT">GTT</option>
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-nature">
+                        <span class="label-text">Trade Nature</span>
+                    </label>
+                    <select id="equity-filter-nature" class="select select-bordered select-sm" onchange="equityLoadTradeBook()">
+                        <option value="all" selected>All</option>
+                        {% for nature in trade_natures %}
+                        <option value="{{ nature.id }}">{{ nature.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-from">
+                        <span class="label-text">From</span>
+                    </label>
+                    <input type="date" id="equity-filter-from" class="input input-bordered input-sm equity-num"
+                           onchange="equityLoadTradeBook()">
+                </div>
+
+                <div class="form-control">
+                    <label class="label" for="equity-filter-to">
+                        <span class="label-text">To</span>
+                    </label>
+                    <input type="date" id="equity-filter-to" class="input input-bordered input-sm equity-num"
+                           onchange="equityLoadTradeBook()">
+                </div>
+
+                <button onclick="equityClearFilters()" class="btn btn-ghost btn-sm">Clear Filters</button>
+            </div>
+
+            <p class="text-xs text-base-content/60 mt-2" id="equity-window-note">
+                With no date range the book shows today's fills.
+            </p>
+        </div>
+    </div>
+
+    <!-- Totals -->
+    <div class="overflow-x-auto">
+        <div class="stats shadow w-full">
+            <div class="stat">
+                <div class="stat-title">Fills</div>
+                <div class="stat-value text-2xl equity-num" id="equity-total-trades">--</div>
+                <div class="stat-desc">In the current view</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Quantity</div>
+                <div class="stat-value text-2xl equity-num" id="equity-total-quantity">--</div>
+                <div class="stat-desc">Shares executed</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Turnover</div>
+                <div class="stat-value text-2xl equity-num" id="equity-total-value">--</div>
+                <div class="stat-desc">Execution price times quantity</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trades -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Fills</h2>
+            <p class="text-sm text-base-content/60">
+                Turnover here is the raw traded value. It carries no brokerage or statutory charges: those are
+                estimated on the Holdings screen from the rates in Equity Settings.
+            </p>
+
+            <div class="overflow-x-auto">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Stock</th>
+                            <th>Exchange</th>
+                            <th>Side</th>
+                            <th>Order Type</th>
+                            <th>Account</th>
+                            <th class="text-right">Qty</th>
+                            <th class="text-right">Execution Price</th>
+                            <th class="text-right">Value</th>
+                            <th>Trade Nature</th>
+                            <th>Order</th>
+                        </tr>
+                    </thead>
+                    <tbody id="equity-trades-body">
+                        <tr>
+                            <td colspan="11" class="text-center py-8 text-base-content/60">
+                                Loading fills.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Parent order split -->
+<dialog id="equity-split-modal" class="modal">
+    <div class="modal-box max-w-5xl">
+        <h3 class="font-bold text-lg" id="equity-split-title">Parent Order</h3>
+        <p class="text-sm text-base-content/60" id="equity-split-subtitle"></p>
+
+        <div class="overflow-x-auto mt-3">
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>Member</th>
+                        <th class="text-right">Qty Ratio</th>
+                        <th class="text-right">Qty</th>
+                        <th class="text-right">Est. Value</th>
+                        <th>Status</th>
+                        <th class="text-right">Filled</th>
+                        <th class="text-right">Avg Fill</th>
+                        <th>Broker Reference</th>
+                    </tr>
+                </thead>
+                <tbody id="equity-split-body">
+                    <tr>
+                        <td colspan="8" class="text-center py-6 text-base-content/60">Loading.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-sm">Close</button>
+            </form>
+        </div>
+    </div>
+</dialog>
+
+<script>
+// ---------------------------------------------------------------------------
+// Equity Trade Book (M6). Read only.
+//
+// A fill is written by the order status reconciliation, which is not part of
+// this increment. Until that lands this table is legitimately empty, so the
+// empty state says so rather than reading as a failure.
+// ---------------------------------------------------------------------------
+
+// One shared formatting helper for the whole screen so the rounding rules
+// cannot drift between the totals strip and the table.
+const EquityFormat = {
+    LAKH: 100000,
+
+    // Compact rupees for summary figures: the lakh suffix above one lakh
+    // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
+    compact: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '₹0'; }
+        const sign = num < 0 ? '-' : '';
+        const abs = Math.abs(num);
+        if (abs >= EquityFormat.LAKH) {
+            return sign + '₹' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+        }
+        return sign + '₹' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    },
+
+    // Plain Indian grouped rupees with paise, for the price columns.
+    rupees: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return 'Rs 0.00'; }
+        const sign = num < 0 ? '-' : '';
+        return sign + '₹' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    },
+
+    // Percent to one decimal place, keeping a second decimal only where it
+    // carries information: 2.28, 10.0, 0.97, 4.98.
+    percent: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0.0'; }
+        let text = num.toFixed(2);
+        if (text.slice(-1) === '0') { text = text.slice(0, -1); }
+        return text + '%';
+    },
+
+    integer: function (value) {
+        const num = Number(value);
+        if (!isFinite(num)) { return '0'; }
+        return Math.round(num).toLocaleString('en-IN');
+    },
+
+    clockTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    },
+
+    dateTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleString('en-IN', { hour12: false });
+    }
+};
+
+const EQUITY_POLL_MS = 30000;
+const EQUITY_FETCH_TIMEOUT_MS = 20000;
+const EQUITY_COLUMN_COUNT = 11;
+
+let equityPollTimer = null;
+let equityLoading = false;
+let equityAccountsRendered = false;
+
+function equitySetText(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) { return; }
+    el.textContent = text;
+    if (className !== undefined) {
+        el.className = className;
+    }
+}
+
+function equityShowStale(message) {
+    const banner = document.getElementById('equity-stale-banner');
+    const text = document.getElementById('equity-stale-text');
+    if (!banner || !text) { return; }
+    if (message) {
+        text.textContent = message;
+        banner.classList.remove('hidden');
+    } else {
+        banner.classList.add('hidden');
+    }
+}
+
+function equityCell(text, className) {
+    const td = document.createElement('td');
+    if (className) { td.className = className; }
+    td.textContent = text === null || text === undefined ? '' : String(text);
+    return td;
+}
+
+function equityMessageRow(message, columns) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = columns || EQUITY_COLUMN_COUNT;
+    cell.className = 'text-center py-8 text-base-content/60';
+    cell.textContent = message;
+    row.appendChild(cell);
+    return row;
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+
+function equityValue(id, fallback) {
+    const el = document.getElementById(id);
+    if (!el) { return fallback; }
+    const raw = (el.value || '').trim();
+    return raw === '' ? fallback : raw;
+}
+
+function equityFilterQuery() {
+    const params = new URLSearchParams();
+    params.set('account', equityValue('equity-filter-account', 'all'));
+    params.set('side', equityValue('equity-filter-side', 'all'));
+    params.set('status', equityValue('equity-filter-status', 'all'));
+    params.set('order_type', equityValue('equity-filter-type', 'all'));
+    params.set('trade_nature', equityValue('equity-filter-nature', 'all'));
+
+    const symbol = equityValue('equity-filter-symbol', '');
+    if (symbol) { params.set('symbol', symbol.toUpperCase()); }
+
+    const from = equityValue('equity-filter-from', '');
+    if (from) { params.set('from', from); }
+
+    const to = equityValue('equity-filter-to', '');
+    if (to) { params.set('to', to); }
+
+    return params.toString();
+}
+
+function equityClearFilters() {
+    ['equity-filter-symbol', 'equity-filter-from', 'equity-filter-to'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) { el.value = ''; }
+    });
+    ['equity-filter-account', 'equity-filter-side', 'equity-filter-status',
+     'equity-filter-type', 'equity-filter-nature'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) { el.value = 'all'; }
+    });
+    equityLoadTradeBook();
+}
+
+// The account filter is built from the payload rather than from the page
+// context, because a fill can reference an account that has since been
+// deactivated and that history has to stay reachable.
+function equityRenderAccountOptions(options) {
+    if (equityAccountsRendered) { return; }
+    const select = document.getElementById('equity-filter-account');
+    if (!select) { return; }
+
+    const chosen = select.value;
+    select.textContent = '';
+
+    const all = document.createElement('option');
+    all.value = 'all';
+    all.textContent = 'All Accounts';
+    select.appendChild(all);
+
+    (options.accounts || []).forEach(function (account) {
+        const option = document.createElement('option');
+        option.value = String(account.account_id);
+        option.textContent = account.account_name + (account.is_active ? '' : ' (inactive)');
+        select.appendChild(option);
+    });
+
+    select.value = chosen || 'all';
+    equityAccountsRendered = true;
+}
+
+// ---------------------------------------------------------------------------
+// Rows
+//
+// Every cell is written with textContent, so a broker supplied symbol or an
+// admin supplied account name can never be treated as markup.
+// ---------------------------------------------------------------------------
+
+function equitySideCell(side) {
+    const td = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.className = side === 'SELL' ? 'badge badge-error badge-sm' : 'badge badge-success badge-sm';
+    badge.textContent = side;
+    td.appendChild(badge);
+    return td;
+}
+
+function equityAccountCell(trade) {
+    const td = document.createElement('td');
+
+    const name = document.createElement('div');
+    name.textContent = trade.account_name || ('Account ' + trade.account_id);
+    td.appendChild(name);
+
+    const broker = document.createElement('div');
+    broker.className = 'text-xs text-base-content/50';
+    broker.textContent = trade.broker_name || 'Broker not detected';
+    td.appendChild(broker);
+
+    return td;
+}
+
+function equityOrderLinkCell(trade) {
+    const td = document.createElement('td');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-xs btn-outline';
+    button.textContent = 'Order ' + trade.order_id;
+    button.title = 'Open the parent order and its per-account split';
+    button.onclick = function () { equityOpenParentOrder(trade.order_id); };
+    td.appendChild(button);
+
+    const status = document.createElement('div');
+    status.className = 'text-xs text-base-content/50';
+    status.textContent = trade.order_status || '';
+    td.appendChild(status);
+
+    if (trade.broker_trade_id) {
+        const reference = document.createElement('div');
+        reference.className = 'text-xs text-base-content/50 equity-num';
+        reference.textContent = 'Trade ' + trade.broker_trade_id;
+        td.appendChild(reference);
+    }
+
+    return td;
+}
+
+function equityTradeRow(trade) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover';
+
+    tr.appendChild(equityCell(EquityFormat.clockTime(trade.executed_at), 'equity-num'));
+    tr.appendChild(equityCell(trade.symbol, 'font-semibold'));
+    tr.appendChild(equityCell(trade.exchange));
+    tr.appendChild(equitySideCell(trade.side));
+    tr.appendChild(equityCell(trade.order_type));
+    tr.appendChild(equityAccountCell(trade));
+    tr.appendChild(equityCell(EquityFormat.integer(trade.executed_quantity), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.rupees(trade.execution_price), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.rupees(trade.trade_value), 'text-right equity-num'));
+    tr.appendChild(equityCell(trade.trade_nature || 'Unassigned'));
+    tr.appendChild(equityOrderLinkCell(trade));
+
+    return tr;
+}
+
+function equityRenderTrades(trades, filtered) {
+    const body = document.getElementById('equity-trades-body');
+    if (!body) { return; }
+
+    body.textContent = '';
+
+    if (!trades.length) {
+        body.appendChild(equityMessageRow(
+            filtered
+                ? 'No fills for the selected filters. Widen the date range or clear the filters to see more.'
+                : 'No fills recorded yet. A fill is written when order status reconciliation reads it back from '
+                  + 'the broker, which is not part of this increment, so this table stays empty until that lands. '
+                  + 'Placed orders and their per-account splits are on the Order Book.'
+        ));
+        return;
+    }
+
+    trades.forEach(function (trade) {
+        body.appendChild(equityTradeRow(trade));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Parent order
+// ---------------------------------------------------------------------------
+
+function equitySplitStatusBadgeClass(status) {
+    if (status === 'COMPLETED') { return 'badge badge-success badge-sm'; }
+    if (status === 'PENDING') { return 'badge badge-info badge-sm'; }
+    if (status === 'PARTIAL') { return 'badge badge-warning badge-sm'; }
+    if (status === 'INDETERMINATE') { return 'badge badge-error badge-sm'; }
+    if (status === 'FAILED' || status === 'REJECTED') { return 'badge badge-error badge-sm'; }
+    if (status === 'UNSUPPORTED') { return 'badge badge-warning badge-sm'; }
+    if (status === 'SKIPPED' || status === 'CANCELLED') { return 'badge badge-ghost badge-sm'; }
+    return 'badge badge-outline badge-sm';
+}
+
+function equityMemberCell(split) {
+    const td = document.createElement('td');
+
+    const name = document.createElement('div');
+    name.className = 'font-semibold';
+    name.textContent = split.account_name || ('Account ' + split.account_id);
+    td.appendChild(name);
+
+    const broker = document.createElement('div');
+    broker.className = 'text-xs text-base-content/50';
+    broker.textContent = split.broker_name || 'Broker not detected';
+    td.appendChild(broker);
+
+    return td;
+}
+
+function equitySplitStatusCell(split) {
+    const td = document.createElement('td');
+
+    const badge = document.createElement('span');
+    badge.className = equitySplitStatusBadgeClass(split.fill_status);
+    badge.textContent = split.fill_status;
+    td.appendChild(badge);
+
+    if (split.error_message) {
+        const error = document.createElement('div');
+        error.className = 'text-xs text-warning';
+        error.textContent = split.error_message;
+        td.appendChild(error);
+    }
+
+    return td;
+}
+
+function equityBrokerReferenceCell(split) {
+    const td = document.createElement('td');
+    td.className = 'text-xs equity-num';
+
+    if (split.broker_order_id) {
+        const line = document.createElement('div');
+        line.textContent = 'Order ' + split.broker_order_id;
+        td.appendChild(line);
+    }
+    if (split.broker_gtt_id) {
+        const line = document.createElement('div');
+        line.textContent = 'GTT ' + split.broker_gtt_id;
+        td.appendChild(line);
+    }
+    if (!td.childNodes.length) {
+        td.textContent = 'No broker reference';
+        td.className = 'text-xs text-base-content/50';
+    }
+    return td;
+}
+
+async function equityOpenParentOrder(orderId) {
+    const modal = document.getElementById('equity-split-modal');
+    const body = document.getElementById('equity-split-body');
+    if (!modal || !body) { return; }
+
+    equitySetText('equity-split-title', 'Parent Order ' + orderId);
+    equitySetText('equity-split-subtitle', 'Loading the per-account split.');
+    body.textContent = '';
+    body.appendChild(equityMessageRow('Loading.', 8));
+    modal.showModal();
+
+    try {
+        const response = await fetch('/equity/api/orders/' + orderId + '/splits?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equitySetText('equity-split-subtitle', data.message || 'The parent order could not be loaded.');
+            body.textContent = '';
+            body.appendChild(equityMessageRow('The parent order could not be loaded.', 8));
+            return;
+        }
+
+        const order = data.order || {};
+        equitySetText(
+            'equity-split-title',
+            'Parent Order: ' + order.symbol + ' ' + order.side + ' ' + EquityFormat.integer(order.total_quantity)
+        );
+        equitySetText(
+            'equity-split-subtitle',
+            order.order_type + ' on ' + order.exchange + ', placed ' + EquityFormat.dateTime(order.placed_at) +
+            ', status ' + order.status + '. ' + (order.accounts_label || '') + ' accounts reached the broker.'
+        );
+
+        body.textContent = '';
+        const splits = data.splits || [];
+        if (!splits.length) {
+            body.appendChild(equityMessageRow('This order has no account splits recorded.', 8));
+            return;
+        }
+
+        splits.forEach(function (split) {
+            const tr = document.createElement('tr');
+            tr.className = 'hover';
+
+            tr.appendChild(equityMemberCell(split));
+            tr.appendChild(equityCell(EquityFormat.percent(split.qty_ratio), 'text-right equity-num'));
+            tr.appendChild(equityCell(EquityFormat.integer(split.quantity), 'text-right equity-num'));
+            tr.appendChild(equityCell(
+                split.est_value === null || split.est_value === undefined ? '-' : EquityFormat.rupees(split.est_value),
+                'text-right equity-num'
+            ));
+            tr.appendChild(equitySplitStatusCell(split));
+            tr.appendChild(equityCell(EquityFormat.integer(split.filled_quantity), 'text-right equity-num'));
+            tr.appendChild(equityCell(
+                split.avg_fill_price === null || split.avg_fill_price === undefined
+                    ? '-' : EquityFormat.rupees(split.avg_fill_price),
+                'text-right equity-num'
+            ));
+            tr.appendChild(equityBrokerReferenceCell(split));
+
+            body.appendChild(tr);
+        });
+    } catch (error) {
+        equitySetText('equity-split-subtitle', 'The parent order could not be loaded. Check the connection.');
+        body.textContent = '';
+        body.appendChild(equityMessageRow('The parent order could not be loaded.', 8));
+        console.error('Equity parent order load failed:', error);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Load
+// ---------------------------------------------------------------------------
+
+function equityRenderTotals(payload) {
+    const totals = payload.totals || {};
+    equitySetText('equity-total-trades', EquityFormat.integer(totals.trades));
+    equitySetText('equity-total-quantity', EquityFormat.integer(totals.quantity));
+    equitySetText('equity-total-value', EquityFormat.compact(totals.value));
+
+    const viewWindow = payload.window || {};
+    equitySetText(
+        'equity-window-note',
+        viewWindow.today_only
+            ? 'Showing today\'s fills. Set a date range to look further back.'
+            : 'Showing the selected date range exactly.'
+    );
+}
+
+function equityFiltersApplied(payload) {
+    const filters = payload.filters || {};
+    return Boolean(
+        (filters.account && filters.account !== 'all') ||
+        filters.symbol ||
+        (filters.side && filters.side !== 'all') ||
+        (filters.status && filters.status !== 'all') ||
+        (filters.order_type && filters.order_type !== 'all') ||
+        (filters.trade_nature && filters.trade_nature !== 'all') ||
+        filters.from ||
+        filters.to
+    );
+}
+
+async function equityLoadTradeBook() {
+    if (equityLoading) { return; }
+    equityLoading = true;
+
+    const button = document.getElementById('equity-refresh-btn');
+    if (button) { button.disabled = true; }
+
+    try {
+        const response = await fetch(
+            '/equity/api/trade-book?' + equityFilterQuery() + '&_t=' + Date.now(),
+            { signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS) }
+        );
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowStale('The trade book could not be loaded. ' + (data.message || ''));
+            return;
+        }
+
+        equityRenderAccountOptions(data.options || {});
+        equityRenderTotals(data);
+        equityRenderTrades(data.trades || [], equityFiltersApplied(data));
+        equityShowStale('');
+        equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(data.generated_at));
+    } catch (error) {
+        // Degrade to a visible stale marker, never blank the page.
+        equityShowStale('The trade book could not be loaded, showing the last values loaded. Retrying shortly.');
+        console.error('Equity trade book load failed:', error);
+    } finally {
+        equityLoading = false;
+        if (button) { button.disabled = false; }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    equityLoadTradeBook();
+    equityPollTimer = setInterval(equityLoadTradeBook, EQUITY_POLL_MS);
+});
+
+window.addEventListener('beforeunload', function () {
+    if (equityPollTimer) {
+        clearInterval(equityPollTimer);
+        equityPollTimer = null;
+    }
+});
+</script>
+{% endblock %}

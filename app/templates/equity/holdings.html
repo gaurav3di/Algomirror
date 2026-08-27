@@ -18,13 +18,14 @@
         <div>
             <h1 class="text-3xl font-bold">Holdings</h1>
             <p class="text-base-content/70 mt-1">
-                CNC delivery holdings with stake, estimated exit costs and net P&amp;L. This screen is read-only.
+                CNC delivery holdings with stake, estimated exit costs and net P&amp;L. Stop loss and target are armed
+                here, and the background monitor acts on them with no browser tab open.
             </p>
         </div>
         <div class="flex gap-3 items-center flex-wrap">
             <span class="text-xs text-base-content/50 equity-num" id="equity-last-updated">Not loaded yet</span>
             {% if accounts %}
-            <button onclick="equityLoadHoldings()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">Refresh</button>
+            <button onclick="equityRefreshAll()" class="btn btn-ghost btn-sm h-9" id="equity-refresh-btn">Refresh</button>
             <!-- The export is a pure read, so it is a plain link. Its query
                  string is kept in step with the filters by the script below. -->
             <a href="{{ url_for('equity.api_holdings_export') }}"
@@ -80,6 +81,102 @@
         <span id="equity-rates-text"></span>
     </div>
 
+    <!-- Result of the last write. -->
+    <div class="alert hidden" id="equity-result-banner">
+        <span id="equity-result-text"></span>
+    </div>
+
+    <!--
+        EXIT QUEUE.
+
+        Three groups, and they are three different problems: a CONFIRM mode
+        breach waiting on a decision, a sell already in flight, and a sell whose
+        outcome was never confirmed. Only the first one is a decision.
+    -->
+    <div class="card bg-base-100 shadow-xl hidden" id="equity-exit-queue-card">
+        <div class="card-body">
+            <div class="flex justify-between items-center gap-3 flex-wrap">
+                <h2 class="card-title">Exits Waiting On You</h2>
+                <span class="text-xs text-base-content/60" id="equity-monitor-status"></span>
+            </div>
+
+            <p class="text-sm text-base-content/60 hidden" id="equity-queue-empty-note">
+                Nothing is waiting on a decision. This card is showing because the monitor needs attention.
+            </p>
+
+            <div id="equity-awaiting-section" class="hidden">
+                <h3 class="font-semibold mt-2">Awaiting Confirmation</h3>
+                <p class="text-sm text-base-content/60">
+                    A confirm-exit level was breached. Nothing has been sold. Approve to sell now, or decline to leave
+                    the holding alone. Declining keeps the breach record, so the same alert does not reappear until
+                    you edit the level.
+                </p>
+                <div class="overflow-x-auto">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Account</th>
+                                <th class="text-right">Sellable</th>
+                                <th>Breached</th>
+                                <th class="text-right">Stop Loss</th>
+                                <th class="text-right">Target</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="equity-awaiting-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="equity-inflight-section" class="hidden">
+                <h3 class="font-semibold mt-4">Exits In Flight</h3>
+                <p class="text-sm text-base-content/60">
+                    A sell is claimed or already at the broker. Nothing to do but wait: a second sell against the same
+                    shares is refused while this is open.
+                </p>
+                <div class="overflow-x-auto">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Account</th>
+                                <th class="text-right">Qty</th>
+                                <th>Reason</th>
+                                <th>State</th>
+                                <th>Broker Order</th>
+                            </tr>
+                        </thead>
+                        <tbody id="equity-inflight-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="equity-indeterminate-section" class="hidden">
+                <h3 class="font-semibold mt-4 text-error">Unconfirmed Exits</h3>
+                <p class="text-sm text-base-content/60">
+                    The answer to a sell never arrived, so it is unknown whether it reached the broker. These are never
+                    retried automatically. Check the broker order book, then reopen the holding here.
+                </p>
+                <div class="overflow-x-auto">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Account</th>
+                                <th class="text-right">Qty</th>
+                                <th>Reason</th>
+                                <th>What Happened</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="equity-indeterminate-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- KPI cards -->
     <div class="overflow-x-auto">
         <div class="stats shadow w-full">
@@ -110,6 +207,10 @@
     <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
             <h2 class="card-title">Holdings</h2>
+            <p class="text-sm text-base-content/60">
+                Stop Loss and Target are AlgoMirror's own levels, watched by the background monitor. AUTO sells the
+                moment a level is breached. CONFIRM raises an alert and waits for you.
+            </p>
 
             <div class="overflow-x-auto">
                 <table class="table table-sm">
@@ -117,12 +218,13 @@
                         <tr>
                             <th>Symbol</th>
                             <th class="text-right">Total Qty</th>
-                            <th class="text-right">Stake</th>
+                            <th class="text-right">Stake %</th>
                             <th class="text-right">Avg Cost</th>
                             <th class="text-right">LTP</th>
                             <th class="text-right">P&amp;L %</th>
-                            <th>Stop Loss <span class="text-xs font-medium text-base-content/50">(editing coming soon)</span></th>
-                            <th>Target <span class="text-xs font-medium text-base-content/50">(editing coming soon)</span></th>
+                            <th>Stop Loss</th>
+                            <th>Target</th>
+                            <th>Exit Mode</th>
                             <th class="text-right">Pledged</th>
                             <th class="text-right">Gross P&amp;L</th>
                             <th class="text-right">Est. Costs</th>
@@ -132,7 +234,7 @@
                     </thead>
                     <tbody id="equity-holdings-body">
                         <tr>
-                            <td colspan="13" class="text-center py-8 text-base-content/60">
+                            <td colspan="14" class="text-center py-8 text-base-content/60">
                                 Loading holdings.
                             </td>
                         </tr>
@@ -145,8 +247,9 @@
                 account, priced at the current LTP. Net P&amp;L is Gross P&amp;L minus Est. Costs.
             </p>
             <p class="text-xs text-base-content/60">
-                Stop loss and target editing arrives in a later increment, so those boxes are disabled. There are no
-                Buy or Sell actions here: nothing on this screen can place, modify or cancel a broker order.
+                Saving a level applies it to every account that holds the symbol on that row. Use Accounts to open the
+                per-account breakdown and arm one account on its own. Buy and Sell open Place Order with the stock
+                pre-filled: nothing is sent from this screen without going through that confirmation.
             </p>
         </div>
     </div>
@@ -167,10 +270,92 @@
     {% endif %}
 </div>
 
+<!-- Confirm a level save -->
+<dialog id="equity-levels-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg" id="equity-levels-title">Save Exit Levels</h3>
+
+        <div class="alert my-3" id="equity-levels-headline">
+            <span id="equity-levels-headline-text"></span>
+        </div>
+
+        <ul class="list-disc list-inside space-y-1 text-sm" id="equity-levels-lines"></ul>
+
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-sm">Cancel</button>
+            </form>
+            <button type="button" class="btn btn-sm btn-primary" id="equity-levels-confirm-btn"
+                    onclick="equitySubmitLevels()">Save Levels</button>
+        </div>
+    </div>
+</dialog>
+
+<!-- Confirm an exit approval -->
+<dialog id="equity-approve-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg text-error">Approve This Exit</h3>
+        <p class="py-4" id="equity-approve-text"></p>
+        <div class="alert alert-error">
+            <span>
+                This sells at market as soon as you approve. Pledged shares are never sold, and the sale is claimed
+                first so the monitor cannot sell the same shares a second time.
+            </span>
+        </div>
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-sm">Cancel</button>
+            </form>
+            <button type="button" class="btn btn-sm btn-error" id="equity-approve-confirm-btn"
+                    onclick="equitySubmitApprove()">Sell Now</button>
+        </div>
+    </div>
+</dialog>
+
+<!-- Reopen an unconfirmed exit -->
+<dialog id="equity-resolve-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg">Reopen This Holding</h3>
+        <p class="py-4" id="equity-resolve-text"></p>
+
+        <div class="form-control">
+            <label class="label" for="equity-resolve-note">
+                <span class="label-text">What did you find at the broker?</span>
+            </label>
+            <input type="text" id="equity-resolve-note" class="input input-bordered input-sm"
+                   maxlength="500" placeholder="For example: checked the broker order book, no order is live">
+        </div>
+
+        <div class="alert alert-warning mt-3">
+            <span>
+                Only reopen this once you have confirmed at the broker that no order from this exit is still live.
+                Reopening lets the monitor arm against it again.
+            </span>
+        </div>
+
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-sm">Cancel</button>
+            </form>
+            <button type="button" class="btn btn-sm btn-warning" id="equity-resolve-confirm-btn"
+                    onclick="equitySubmitResolve()">Reopen</button>
+        </div>
+    </div>
+</dialog>
+
 <script>
 // ---------------------------------------------------------------------------
-// Equity Holdings (M7). Read only: it polls /equity/api/holdings and renders
-// the rows. Nothing here can place, modify or cancel a broker order.
+// Equity Holdings (M7).
+//
+// The table itself is a read. Three things here write:
+//     the stop loss, target and exit mode editors, which post to
+//         /equity/api/holdings/levels and arm the background exit monitor,
+//     the exit queue, where a confirm-exit breach is approved or declined,
+//     and reopening a holding whose exit outcome was never confirmed.
+//
+// Buy and Sell are pure navigation to Place Order with the stock pre-filled.
+// Nothing on this screen sends an order to a broker except an exit you approve
+// in the queue, which has its own confirmation.
 // ---------------------------------------------------------------------------
 
 // One shared formatting helper for the whole screen so the rounding rules
@@ -182,13 +367,13 @@ const EquityFormat = {
     // (Rs 47.10L), plain Indian grouped digits below it (Rs 1,14,500).
     compact: function (value) {
         const num = Number(value);
-        if (!isFinite(num)) { return 'Rs 0'; }
+        if (!isFinite(num)) { return '₹0'; }
         const sign = num < 0 ? '-' : '';
         const abs = Math.abs(num);
         if (abs >= EquityFormat.LAKH) {
-            return sign + 'Rs ' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
+            return sign + '₹' + (abs / EquityFormat.LAKH).toFixed(2) + 'L';
         }
-        return sign + 'Rs ' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+        return sign + '₹' + abs.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
     },
 
     // Plain Indian grouped rupees with paise, for the price and P&L columns.
@@ -196,11 +381,11 @@ const EquityFormat = {
         const num = Number(value);
         if (!isFinite(num)) { return 'Rs 0.00'; }
         const sign = num < 0 ? '-' : '';
-        return sign + 'Rs ' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return sign + '₹' + Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     },
 
-    // Bare grouped amount with paise, for the disabled level boxes where the
-    // rupee prefix would not fit.
+    // Bare grouped amount with paise, for the level boxes where the rupee
+    // prefix would not fit.
     amount: function (value) {
         const num = Number(value);
         if (!isFinite(num)) { return ''; }
@@ -242,14 +427,28 @@ const EquityFormat = {
         const parsed = new Date(isoText);
         if (isNaN(parsed.getTime())) { return ''; }
         return parsed.toLocaleTimeString('en-IN', { hour12: false });
+    },
+
+    dateTime: function (isoText) {
+        if (!isoText) { return ''; }
+        const parsed = new Date(isoText);
+        if (isNaN(parsed.getTime())) { return ''; }
+        return parsed.toLocaleString('en-IN', { hour12: false });
     }
 };
 
 const EQUITY_POLL_MS = 30000;
 const EQUITY_FETCH_TIMEOUT_MS = 20000;
-const EQUITY_COLUMN_COUNT = 13;
+const EQUITY_WRITE_TIMEOUT_MS = 60000;
+const EQUITY_COLUMN_COUNT = 14;
+const EQUITY_PLACE_ORDER_URL = '{{ url_for("equity.place_order") }}';
+
 let equityPollTimer = null;
 let equityLoading = false;
+let equityExpanded = {};
+let equityPendingLevels = null;
+let equityApproveHoldingId = null;
+let equityResolveHoldingId = null;
 
 function equitySetText(id, text, className) {
     const el = document.getElementById(id);
@@ -270,6 +469,20 @@ function equityShowBanner(bannerId, textId, message) {
     } else {
         banner.classList.add('hidden');
     }
+}
+
+function equityShowResult(message, kind) {
+    const banner = document.getElementById('equity-result-banner');
+    const text = document.getElementById('equity-result-text');
+    if (!banner || !text) { return; }
+    if (!message) {
+        banner.classList.add('hidden');
+        return;
+    }
+    text.textContent = message;
+    banner.className = 'alert ' + (
+        kind === 'error' ? 'alert-error' : (kind === 'warning' ? 'alert-warning' : 'alert-success')
+    );
 }
 
 function equityFilterValues() {
@@ -297,7 +510,7 @@ function equityUpdateExportLink() {
 
 function equityFiltersChanged() {
     equityUpdateExportLink();
-    equityLoadHoldings();
+    equityLoadHoldings(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,10 +525,10 @@ function equityCell(text, className) {
     return td;
 }
 
-function equityMessageRow(message) {
+function equityMessageRow(message, columns) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = EQUITY_COLUMN_COUNT;
+    cell.colSpan = columns || EQUITY_COLUMN_COUNT;
     cell.className = 'text-center py-8 text-base-content/60';
     cell.textContent = message;
     row.appendChild(cell);
@@ -327,62 +540,122 @@ function equityGroupRow(group) {
     const cell = document.createElement('td');
     cell.colSpan = EQUITY_COLUMN_COUNT;
     cell.className = 'bg-base-200 text-xs font-semibold uppercase tracking-wider';
-    cell.textContent = (group.trade_nature || 'Unassigned') + ' (' + group.rows.length + ')';
+    cell.textContent = (group.trade_nature || 'Unassigned') + ' (' + (group.rows || []).length + ')';
     row.appendChild(cell);
     return row;
 }
 
-// Stop loss and target cell: the value in a disabled editor box, the AE or CE
-// exit mode tag, and a note when the contributing accounts disagree.
-function equityLevelCell(value, tag, levelsMixed) {
+function equityRowKey(row) {
+    return row.symbol + '|' + row.exchange + '|' + (row.trade_nature_id || 0);
+}
+
+// Buy and Sell are pure navigation: they open Place Order with the stock
+// pre-filled and place nothing on their own.
+function equityPlaceOrderUrl(row, side, accountId) {
+    const params = new URLSearchParams();
+    params.set('symbol', row.symbol);
+    params.set('exchange', row.exchange || 'NSE');
+    params.set('side', side);
+    if (row.trade_nature_id) { params.set('trade_nature_id', String(row.trade_nature_id)); }
+    if (accountId) { params.set('accounts', String(accountId)); }
+    return EQUITY_PLACE_ORDER_URL + '?' + params.toString();
+}
+
+// The stop loss and target editors. A blank box clears the level, which is
+// what the server reads a null as.
+function equityLevelCell(row, field) {
     const td = document.createElement('td');
 
-    const wrapper = document.createElement('div');
-    wrapper.className = 'flex items-center gap-2';
+    const value = field === 'stop_loss' ? row.stop_loss : row.target;
 
     const box = document.createElement('input');
-    box.type = 'text';
-    box.className = 'input input-bordered input-sm w-32 equity-num';
-    box.value = value === null || value === undefined ? '' : EquityFormat.amount(value);
+    box.type = 'number';
+    box.min = '0';
+    box.step = '0.05';
+    box.className = 'input input-bordered input-xs w-28 text-right equity-num';
+    box.value = value === null || value === undefined ? '' : value;
     box.placeholder = 'Not set';
-    box.disabled = true;
-    box.title = 'Coming soon: editing arrives in a later increment';
-    wrapper.appendChild(box);
+    box.setAttribute('data-row-key', equityRowKey(row));
+    box.setAttribute('data-field', field);
+    box.setAttribute('aria-label', (field === 'stop_loss' ? 'Stop loss for ' : 'Target for ') + row.symbol);
+    td.appendChild(box);
 
-    const badge = document.createElement('span');
-    badge.className = 'badge badge-outline badge-sm';
-    badge.textContent = tag || 'CE';
-    badge.title = tag === 'AE' ? 'Auto-exit' : 'Confirm-exit';
-    wrapper.appendChild(badge);
-
-    td.appendChild(wrapper);
-
-    if (levelsMixed) {
+    if (row.levels_mixed) {
         const note = document.createElement('div');
         note.className = 'text-xs text-warning';
         note.textContent = 'Accounts differ';
+        note.title = 'The contributing accounts do not hold the same level. Open Accounts to see each one.';
         td.appendChild(note);
     }
 
     return td;
 }
 
-function equityActionsCell() {
+function equityExitModeCell(row) {
     const td = document.createElement('td');
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'btn btn-xs btn-outline btn-disabled';
-    button.disabled = true;
-    button.textContent = 'Edit levels';
-    button.title = 'Coming soon: editing arrives in a later increment';
-    td.appendChild(button);
+    const select = document.createElement('select');
+    select.className = 'select select-bordered select-xs w-28';
+    select.setAttribute('data-row-key', equityRowKey(row));
+    select.setAttribute('data-field', 'exit_mode');
+    select.setAttribute('aria-label', 'Exit mode for ' + row.symbol);
 
-    const note = document.createElement('div');
-    note.className = 'text-xs text-base-content/50';
-    note.textContent = 'Coming soon';
-    td.appendChild(note);
+    [['AUTO', 'AUTO sells'], ['CONFIRM', 'CONFIRM asks']].forEach(function (entry) {
+        const option = document.createElement('option');
+        option.value = entry[0];
+        option.textContent = entry[1];
+        select.appendChild(option);
+    });
+    select.value = row.exit_mode === 'AUTO' ? 'AUTO' : 'CONFIRM';
 
+    td.appendChild(select);
+
+    const tag = document.createElement('div');
+    tag.className = 'text-xs text-base-content/50';
+    tag.textContent = row.exit_mode_tag || 'CE';
+    tag.title = row.exit_mode === 'AUTO'
+        ? 'Auto-exit: a breach sells immediately'
+        : 'Confirm-exit: a breach raises an alert and waits for you';
+    td.appendChild(tag);
+
+    return td;
+}
+
+function equityActionsCell(row) {
+    const td = document.createElement('td');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center gap-1 flex-wrap';
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn btn-xs btn-primary';
+    save.textContent = 'Save Levels';
+    save.onclick = function () { equityOpenLevels(row); };
+    wrapper.appendChild(save);
+
+    const buy = document.createElement('a');
+    buy.className = 'btn btn-xs btn-success';
+    buy.textContent = 'Buy';
+    buy.href = equityPlaceOrderUrl(row, 'BUY');
+    buy.title = 'Open Place Order with ' + row.symbol + ' pre-filled to buy';
+    wrapper.appendChild(buy);
+
+    const sell = document.createElement('a');
+    sell.className = 'btn btn-xs btn-error';
+    sell.textContent = 'Sell';
+    sell.href = equityPlaceOrderUrl(row, 'SELL');
+    sell.title = 'Open Place Order with ' + row.symbol + ' pre-filled to sell';
+    wrapper.appendChild(sell);
+
+    const accounts = document.createElement('button');
+    accounts.type = 'button';
+    accounts.className = 'btn btn-xs btn-ghost';
+    accounts.textContent = equityExpanded[equityRowKey(row)] ? 'Hide Accounts' : 'Accounts';
+    accounts.onclick = function () { equityToggleAccounts(row); };
+    wrapper.appendChild(accounts);
+
+    td.appendChild(wrapper);
     return td;
 }
 
@@ -415,8 +688,9 @@ function equityHoldingRow(row) {
         EquityFormat.percent(row.pnl_pct),
         ('text-right equity-num ' + EquityFormat.pnlClass(row.pnl_pct)).trim()
     ));
-    tr.appendChild(equityLevelCell(row.stop_loss, row.exit_mode_tag, row.levels_mixed));
-    tr.appendChild(equityLevelCell(row.target, row.exit_mode_tag, row.levels_mixed));
+    tr.appendChild(equityLevelCell(row, 'stop_loss'));
+    tr.appendChild(equityLevelCell(row, 'target'));
+    tr.appendChild(equityExitModeCell(row));
     tr.appendChild(equityCell(EquityFormat.percent(row.pledged_pct), 'text-right equity-num'));
     tr.appendChild(equityCell(
         EquityFormat.signed(row.gross_pnl),
@@ -427,23 +701,711 @@ function equityHoldingRow(row) {
         EquityFormat.signed(row.net_pnl),
         ('text-right equity-num ' + EquityFormat.pnlClass(row.net_pnl)).trim()
     ));
-    tr.appendChild(equityActionsCell());
+    tr.appendChild(equityActionsCell(row));
 
     return tr;
 }
 
-function equityRenderTable(payload) {
+// ---------------------------------------------------------------------------
+// Per-account breakdown
+// ---------------------------------------------------------------------------
+
+function equityToggleAccounts(row) {
+    const key = equityRowKey(row);
+    equityExpanded[key] = !equityExpanded[key];
+    equityRenderTable(equityLastPayload, true);
+}
+
+function equityAccountDetailRow(row) {
+    const tr = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = EQUITY_COLUMN_COUNT;
+    cell.className = 'bg-base-200';
+
+    const heading = document.createElement('div');
+    heading.className = 'text-xs font-semibold uppercase tracking-wider mb-2';
+    heading.textContent = row.symbol + ' by account';
+    cell.appendChild(heading);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'overflow-x-auto';
+
+    const table = document.createElement('table');
+    table.className = 'table table-xs';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Account', 'Qty', 'Avg Cost', 'Pledged', 'Stop Loss', 'Target', 'Exit Mode', 'Est. Costs', 'Actions']
+        .forEach(function (label, index) {
+            const th = document.createElement('th');
+            th.textContent = label;
+            if ((index >= 1 && index <= 3) || index === 7) { th.className = 'text-right'; }
+            headRow.appendChild(th);
+        });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    (row.accounts || []).forEach(function (entry) {
+        tbody.appendChild(equityAccountRow(row, entry));
+    });
+    table.appendChild(tbody);
+
+    wrap.appendChild(table);
+    cell.appendChild(wrap);
+
+    const note = document.createElement('p');
+    note.className = 'text-xs text-base-content/60 mt-2';
+    note.textContent = 'Saving here arms one account only. Saving on the row above arms every account that holds '
+        + 'this symbol.';
+    cell.appendChild(note);
+
+    tr.appendChild(cell);
+    return tr;
+}
+
+function equityAccountRow(row, entry) {
+    const tr = document.createElement('tr');
+    const accountKey = equityRowKey(row) + '|' + entry.account_id;
+
+    const account = document.createElement('td');
+    const name = document.createElement('div');
+    name.className = 'font-semibold';
+    name.textContent = entry.account_name || ('Account ' + entry.account_id);
+    account.appendChild(name);
+    const broker = document.createElement('div');
+    broker.className = 'text-xs text-base-content/50';
+    broker.textContent = entry.broker_name || 'Broker not detected';
+    account.appendChild(broker);
+    tr.appendChild(account);
+
+    tr.appendChild(equityCell(EquityFormat.integer(entry.quantity), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.rupees(entry.avg_cost), 'text-right equity-num'));
+    tr.appendChild(equityCell(EquityFormat.integer(entry.pledged_quantity), 'text-right equity-num'));
+
+    ['stop_loss', 'target'].forEach(function (field) {
+        const td = document.createElement('td');
+        const box = document.createElement('input');
+        box.type = 'number';
+        box.min = '0';
+        box.step = '0.05';
+        box.className = 'input input-bordered input-xs w-24 text-right equity-num';
+        const value = field === 'stop_loss' ? entry.stop_loss : entry.target;
+        box.value = value === null || value === undefined ? '' : value;
+        box.placeholder = 'Not set';
+        box.setAttribute('data-account-key', accountKey);
+        box.setAttribute('data-field', field);
+        box.setAttribute('aria-label',
+            (field === 'stop_loss' ? 'Stop loss for ' : 'Target for ') + row.symbol + ' in ' + entry.account_name);
+        td.appendChild(box);
+        tr.appendChild(td);
+    });
+
+    const modeCell = document.createElement('td');
+    const select = document.createElement('select');
+    select.className = 'select select-bordered select-xs w-28';
+    select.setAttribute('data-account-key', accountKey);
+    select.setAttribute('data-field', 'exit_mode');
+    select.setAttribute('aria-label', 'Exit mode for ' + row.symbol + ' in ' + entry.account_name);
+    [['AUTO', 'AUTO sells'], ['CONFIRM', 'CONFIRM asks']].forEach(function (option) {
+        const el = document.createElement('option');
+        el.value = option[0];
+        el.textContent = option[1];
+        select.appendChild(el);
+    });
+    select.value = entry.exit_mode === 'AUTO' ? 'AUTO' : 'CONFIRM';
+    modeCell.appendChild(select);
+    tr.appendChild(modeCell);
+
+    tr.appendChild(equityCell(EquityFormat.rupees(entry.est_costs), 'text-right equity-num'));
+
+    const actions = document.createElement('td');
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center gap-1 flex-wrap';
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn btn-xs btn-primary';
+    save.textContent = 'Save';
+    save.onclick = function () { equityOpenLevels(row, entry); };
+    wrapper.appendChild(save);
+
+    const sell = document.createElement('a');
+    sell.className = 'btn btn-xs btn-error';
+    sell.textContent = 'Sell';
+    sell.href = equityPlaceOrderUrl(row, 'SELL', entry.account_id);
+    sell.title = 'Open Place Order with ' + row.symbol + ' pre-filled to sell from this account';
+    wrapper.appendChild(sell);
+
+    actions.appendChild(wrapper);
+    tr.appendChild(actions);
+
+    return tr;
+}
+
+// ---------------------------------------------------------------------------
+// Level editing
+// ---------------------------------------------------------------------------
+
+function equityReadLevelBox(selector) {
+    const el = document.querySelector(selector);
+    if (!el) { return { present: false, value: null }; }
+    const raw = (el.value || '').trim();
+    if (raw === '') { return { present: true, value: null }; }
+    const value = parseFloat(raw);
+    if (!isFinite(value) || value <= 0) { return { present: true, value: NaN }; }
+    return { present: true, value: value };
+}
+
+// Builds the payload for one row, either for every contributing account or for
+// one account when the per-account Save was used.
+function equityCollectLevels(row, entry) {
+    const scope = entry ? 'account' : 'row';
+    const prefix = entry
+        ? '[data-account-key="' + equityRowKey(row) + '|' + entry.account_id + '"]'
+        : '[data-row-key="' + equityRowKey(row) + '"]';
+
+    const stopLoss = equityReadLevelBox('input' + prefix + '[data-field="stop_loss"]');
+    const target = equityReadLevelBox('input' + prefix + '[data-field="target"]');
+    const modeEl = document.querySelector('select' + prefix + '[data-field="exit_mode"]');
+    const exitMode = modeEl ? modeEl.value : 'CONFIRM';
+
+    if (isNaN(stopLoss.value)) {
+        return { error: 'The stop loss must be a positive number, or blank to clear it.' };
+    }
+    if (isNaN(target.value)) {
+        return { error: 'The target must be a positive number, or blank to clear it.' };
+    }
+    if (stopLoss.value !== null && target.value !== null && stopLoss.value >= target.value) {
+        return {
+            error: 'The stop loss must be below the target. A stop loss at or above the target is treated as bad '
+                 + 'data and the monitor skips the row entirely.'
+        };
+    }
+
+    const accounts = entry ? [entry] : (row.accounts || []);
+    if (!accounts.length) {
+        return { error: 'This row has no contributing account to save against.' };
+    }
+
+    const levels = accounts.map(function (account) {
+        return {
+            account_id: account.account_id,
+            symbol: row.symbol,
+            exchange: row.exchange,
+            stop_loss: stopLoss.value,
+            target: target.value,
+            exit_mode: exitMode,
+            trade_nature_id: row.trade_nature_id || null
+        };
+    });
+
+    return {
+        scope: scope,
+        row: row,
+        levels: levels,
+        stop_loss: stopLoss.value,
+        target: target.value,
+        exit_mode: exitMode,
+        account_names: accounts.map(function (account) {
+            return account.account_name || ('Account ' + account.account_id);
+        })
+    };
+}
+
+function equityLevelsLine(text, className) {
+    const li = document.createElement('li');
+    if (className) { li.className = className; }
+    li.textContent = text;
+    return li;
+}
+
+function equityOpenLevels(row, entry) {
+    const collected = equityCollectLevels(row, entry);
+    if (collected.error) {
+        equityShowResult(collected.error, 'error');
+        return;
+    }
+
+    equityPendingLevels = collected;
+
+    equitySetText('equity-levels-title', 'Save Exit Levels: ' + row.symbol);
+
+    const headline = document.getElementById('equity-levels-headline');
+    if (headline) {
+        headline.className = 'alert my-3 ' + (collected.exit_mode === 'AUTO' ? 'alert-warning' : 'alert-info');
+    }
+    equitySetText(
+        'equity-levels-headline-text',
+        collected.exit_mode === 'AUTO'
+            ? ('AUTO exit on ' + collected.account_names.length + ' account(s). A breach of either level sells '
+               + 'immediately, with no further confirmation.')
+            : ('CONFIRM exit on ' + collected.account_names.length + ' account(s). A breach raises an alert here '
+               + 'and waits for you before anything is sold.')
+    );
+
+    const lines = document.getElementById('equity-levels-lines');
+    if (lines) {
+        lines.textContent = '';
+        lines.appendChild(equityLevelsLine(
+            'Stop loss: ' + (collected.stop_loss === null ? 'cleared' : EquityFormat.rupees(collected.stop_loss))
+        ));
+        lines.appendChild(equityLevelsLine(
+            'Target: ' + (collected.target === null ? 'cleared' : EquityFormat.rupees(collected.target))
+        ));
+        lines.appendChild(equityLevelsLine(
+            'Applies to: ' + collected.account_names.join(', ')
+        ));
+        lines.appendChild(equityLevelsLine(
+            'Saving re-arms the level, so a level that has already fired can fire again.'
+        ));
+        lines.appendChild(equityLevelsLine(
+            'The monitor runs in the background scheduler, so it keeps watching with every browser tab closed.'
+        ));
+    }
+
+    const button = document.getElementById('equity-levels-confirm-btn');
+    if (button) {
+        button.disabled = false;
+        button.textContent = 'Save Levels';
+    }
+
+    const modal = document.getElementById('equity-levels-modal');
+    if (modal) { modal.showModal(); }
+}
+
+async function equitySubmitLevels() {
+    // Disabling comes first, before anything that can yield.
+    const button = document.getElementById('equity-levels-confirm-btn');
+    if (button) {
+        if (button.disabled) { return; }
+        button.disabled = true;
+        button.textContent = 'Saving';
+    }
+    if (!equityPendingLevels) { return; }
+    const pending = equityPendingLevels;
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/holdings/levels', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ levels: pending.levels }),
+            signal: AbortSignal.timeout(EQUITY_WRITE_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        if (data.status !== 'success') {
+            equityShowResult(data.message || 'The levels could not be saved.', 'error');
+            return;
+        }
+
+        const skipped = (data.results || []).filter(function (result) { return !result.ok; });
+        let message = data.message || 'Levels saved.';
+        if (skipped.length) {
+            message += ' ' + skipped.map(function (result) { return result.message; }).join(' ');
+        }
+        equityShowResult(
+            message,
+            (skipped.length || (data.rearm_failed || []).length) ? 'warning' : 'success'
+        );
+    } catch (error) {
+        equityShowResult(
+            'The levels could not be saved. Check the connection and confirm on screen before relying on them.',
+            'error'
+        );
+        console.error('Equity holding level save failed:', error);
+    } finally {
+        equityPendingLevels = null;
+        const modal = document.getElementById('equity-levels-modal');
+        if (modal) { modal.close(); }
+        equityLoadHoldings(true);
+        equityLoadExitQueue();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exit queue
+// ---------------------------------------------------------------------------
+
+function equityBreachCell(holding) {
+    const td = document.createElement('td');
+
+    if (holding.sl_hit_at) {
+        const line = document.createElement('div');
+        line.className = 'text-error';
+        line.textContent = 'Stop loss at ' + EquityFormat.rupees(holding.sl_hit_price) +
+            ', ' + EquityFormat.dateTime(holding.sl_hit_at);
+        td.appendChild(line);
+    }
+    if (holding.tp_hit_at) {
+        const line = document.createElement('div');
+        line.className = 'text-success';
+        line.textContent = 'Target at ' + EquityFormat.rupees(holding.tp_hit_price) +
+            ', ' + EquityFormat.dateTime(holding.tp_hit_at);
+        td.appendChild(line);
+    }
+    if (!td.childNodes.length) {
+        td.textContent = holding.exit_reason || 'Level breached';
+    }
+
+    return td;
+}
+
+function equityAwaitingRow(holding) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover';
+
+    tr.appendChild(equityCell(holding.symbol + ' ' + (holding.exchange || ''), 'font-semibold'));
+    tr.appendChild(equityCell(holding.account_name || ('Account ' + holding.account_id)));
+    tr.appendChild(equityCell(EquityFormat.integer(holding.sellable_quantity), 'text-right equity-num'));
+    tr.appendChild(equityBreachCell(holding));
+    tr.appendChild(equityCell(
+        holding.stop_loss === null || holding.stop_loss === undefined ? '-' : EquityFormat.rupees(holding.stop_loss),
+        'text-right equity-num'
+    ));
+    tr.appendChild(equityCell(
+        holding.target === null || holding.target === undefined ? '-' : EquityFormat.rupees(holding.target),
+        'text-right equity-num'
+    ));
+
+    const actions = document.createElement('td');
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex items-center gap-1 flex-wrap';
+
+    const approve = document.createElement('button');
+    approve.type = 'button';
+    approve.className = 'btn btn-xs btn-error';
+    approve.textContent = 'Approve Exit';
+    approve.onclick = function () { equityOpenApprove(holding); };
+    wrapper.appendChild(approve);
+
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'btn btn-xs btn-ghost';
+    dismiss.textContent = 'Decline';
+    dismiss.title = 'Leave the holding alone. The breach record stays, so this alert does not reappear until the '
+        + 'level is edited.';
+    dismiss.onclick = function () { equityDismissExit(holding, dismiss); };
+    wrapper.appendChild(dismiss);
+
+    actions.appendChild(wrapper);
+    tr.appendChild(actions);
+
+    return tr;
+}
+
+function equityInFlightRow(holding) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover';
+
+    tr.appendChild(equityCell(holding.symbol + ' ' + (holding.exchange || ''), 'font-semibold'));
+    tr.appendChild(equityCell(holding.account_name || ('Account ' + holding.account_id)));
+    tr.appendChild(equityCell(EquityFormat.integer(holding.exit_quantity), 'text-right equity-num'));
+    tr.appendChild(equityCell(holding.exit_reason || 'MANUAL'));
+    tr.appendChild(equityCell(
+        holding.exit_status === 'EXIT_PENDING' ? 'Claimed, not yet sent' : 'Sent to the broker'
+    ));
+    tr.appendChild(equityCell(holding.exit_broker_order_id || 'Not yet', 'equity-num text-xs'));
+
+    return tr;
+}
+
+function equityIndeterminateRow(holding) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover';
+
+    tr.appendChild(equityCell(holding.symbol + ' ' + (holding.exchange || ''), 'font-semibold'));
+    tr.appendChild(equityCell(holding.account_name || ('Account ' + holding.account_id)));
+    tr.appendChild(equityCell(EquityFormat.integer(holding.exit_quantity), 'text-right equity-num'));
+    tr.appendChild(equityCell(holding.exit_reason || 'MANUAL'));
+
+    const detail = document.createElement('td');
+    detail.className = 'text-xs max-w-md';
+    detail.textContent = holding.exit_error || 'The broker never answered, so the outcome is unknown.';
+    if (holding.exit_broker_order_id) {
+        const reference = document.createElement('div');
+        reference.className = 'equity-num';
+        reference.textContent = 'Broker order ' + holding.exit_broker_order_id;
+        detail.appendChild(reference);
+    }
+    tr.appendChild(detail);
+
+    const actions = document.createElement('td');
+    const resolve = document.createElement('button');
+    resolve.type = 'button';
+    resolve.className = 'btn btn-xs btn-warning';
+    resolve.textContent = 'Reopen';
+    resolve.onclick = function () { equityOpenResolve(holding); };
+    actions.appendChild(resolve);
+    tr.appendChild(actions);
+
+    return tr;
+}
+
+function equityRenderQueueGroup(sectionId, bodyId, rows, builder) {
+    const section = document.getElementById(sectionId);
+    const body = document.getElementById(bodyId);
+    if (!section || !body) { return; }
+
+    body.textContent = '';
+    if (!rows.length) {
+        section.classList.add('hidden');
+        return;
+    }
+
+    rows.forEach(function (holding) { body.appendChild(builder(holding)); });
+    section.classList.remove('hidden');
+}
+
+function equityRenderExitQueue(payload) {
+    const awaiting = payload.awaiting_confirm || [];
+    const inFlight = payload.in_flight || [];
+    const indeterminate = payload.indeterminate || [];
+
+    equityRenderQueueGroup('equity-awaiting-section', 'equity-awaiting-body', awaiting, equityAwaitingRow);
+    equityRenderQueueGroup('equity-inflight-section', 'equity-inflight-body', inFlight, equityInFlightRow);
+    equityRenderQueueGroup(
+        'equity-indeterminate-section', 'equity-indeterminate-body', indeterminate, equityIndeterminateRow
+    );
+
+    const monitor = payload.monitor || {};
+    const parts = [];
+    parts.push(monitor.enabled ? 'Exit monitor on.' : 'Exit monitor OFF in Equity Settings.');
+    if (monitor.last_run_at) {
+        parts.push('Last run ' + EquityFormat.dateTime(monitor.last_run_at) + '.');
+    } else {
+        parts.push('It has not reported a run yet.');
+    }
+    if (monitor.last_error) {
+        parts.push('Last error: ' + monitor.last_error);
+    }
+    equitySetText(
+        'equity-monitor-status',
+        parts.join(' '),
+        'text-xs ' + (monitor.enabled && !monitor.last_error ? 'text-base-content/60' : 'text-warning')
+    );
+
+    // The card also carries the monitor heartbeat, so it stays visible when
+    // the monitor is off or has errored even with an empty queue. A silent
+    // monitor is exactly the thing that must not be hidden.
+    const queued = awaiting.length + inFlight.length + indeterminate.length;
+    const monitorNeedsAttention = !monitor.enabled || Boolean(monitor.last_error);
+
+    const emptyNote = document.getElementById('equity-queue-empty-note');
+    if (emptyNote) { emptyNote.classList.toggle('hidden', queued > 0); }
+
+    const card = document.getElementById('equity-exit-queue-card');
+    if (card) {
+        card.classList.toggle('hidden', queued === 0 && !monitorNeedsAttention);
+    }
+}
+
+function equityOpenApprove(holding) {
+    equityApproveHoldingId = holding.holding_id;
+    equitySetText(
+        'equity-approve-text',
+        'Sell ' + EquityFormat.integer(holding.sellable_quantity) + ' shares of ' + holding.symbol +
+        ' from ' + (holding.account_name || ('Account ' + holding.account_id)) +
+        ' at market? This exit was raised by the ' +
+        (holding.exit_reason === 'TARGET' ? 'target' : 'stop loss') + ' monitor.'
+    );
+
+    const button = document.getElementById('equity-approve-confirm-btn');
+    if (button) {
+        button.disabled = false;
+        button.textContent = 'Sell Now';
+    }
+
+    const modal = document.getElementById('equity-approve-modal');
+    if (modal) { modal.showModal(); }
+}
+
+async function equitySubmitApprove() {
+    // Disabling comes first, before anything that can yield, so a double click
+    // cannot claim and sell twice.
+    const button = document.getElementById('equity-approve-confirm-btn');
+    if (button) {
+        if (button.disabled) { return; }
+        button.disabled = true;
+        button.textContent = 'Selling, do not close this page';
+    }
+    if (!equityApproveHoldingId) { return; }
+    const holdingId = equityApproveHoldingId;
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/holdings/' + holdingId + '/confirm-exit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ order_type: 'MARKET' }),
+            signal: AbortSignal.timeout(EQUITY_WRITE_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        equityShowResult(
+            data.message || 'The exit was submitted.',
+            data.status === 'success' ? 'success' : (data.status === 'error' ? 'error' : 'warning')
+        );
+    } catch (error) {
+        // The sell may already be at the broker, so this reports an unknown
+        // outcome rather than a failure and nothing is resent.
+        equityShowResult(
+            'The answer to this exit never arrived. It may still have reached the broker. Check the broker order '
+            + 'book and the Unconfirmed Exits list below before selling again. Nothing was resent.',
+            'error'
+        );
+        console.error('Equity exit approval failed:', error);
+    } finally {
+        equityApproveHoldingId = null;
+        const modal = document.getElementById('equity-approve-modal');
+        if (modal) { modal.close(); }
+        equityLoadExitQueue();
+        equityLoadHoldings(true);
+    }
+}
+
+async function equityDismissExit(holding, button) {
+    if (button) {
+        if (button.disabled) { return; }
+        button.disabled = true;
+    }
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/holdings/' + holding.holding_id + '/dismiss-exit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({}),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        equityShowResult(
+            data.message || 'The exit alert was declined.',
+            data.status === 'success' ? 'success' : 'error'
+        );
+    } catch (error) {
+        equityShowResult('The exit alert could not be declined. Check the connection and try again.', 'error');
+        console.error('Equity exit dismissal failed:', error);
+    } finally {
+        if (button) { button.disabled = false; }
+        equityLoadExitQueue();
+    }
+}
+
+function equityOpenResolve(holding) {
+    equityResolveHoldingId = holding.holding_id;
+    equitySetText(
+        'equity-resolve-text',
+        'Reopen ' + holding.symbol + ' in ' + (holding.account_name || ('Account ' + holding.account_id)) +
+        '? The last exit of ' + EquityFormat.integer(holding.exit_quantity) + ' shares was never confirmed.'
+    );
+
+    const note = document.getElementById('equity-resolve-note');
+    if (note) { note.value = ''; }
+
+    const button = document.getElementById('equity-resolve-confirm-btn');
+    if (button) {
+        button.disabled = false;
+        button.textContent = 'Reopen';
+    }
+
+    const modal = document.getElementById('equity-resolve-modal');
+    if (modal) { modal.showModal(); }
+}
+
+async function equitySubmitResolve() {
+    // Disabling comes first, before anything that can yield.
+    const button = document.getElementById('equity-resolve-confirm-btn');
+    if (button) {
+        if (button.disabled) { return; }
+        button.disabled = true;
+        button.textContent = 'Reopening';
+    }
+    if (!equityResolveHoldingId) { return; }
+    const holdingId = equityResolveHoldingId;
+
+    const noteEl = document.getElementById('equity-resolve-note');
+    const note = noteEl ? (noteEl.value || '').trim() : '';
+
+    try {
+        const response = await fetchWithCSRF('/equity/api/holdings/' + holdingId + '/resolve-exit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ note: note }),
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+
+        equityShowResult(
+            data.message || 'The holding was reopened.',
+            data.status === 'success' ? 'success' : 'error'
+        );
+    } catch (error) {
+        equityShowResult('The holding could not be reopened. Check the connection and try again.', 'error');
+        console.error('Equity exit reconciliation failed:', error);
+    } finally {
+        equityResolveHoldingId = null;
+        const modal = document.getElementById('equity-resolve-modal');
+        if (modal) { modal.close(); }
+        equityLoadExitQueue();
+        equityLoadHoldings(true);
+    }
+}
+
+async function equityLoadExitQueue() {
+    try {
+        const response = await fetch('/equity/api/holdings/exit-queue?_t=' + Date.now(), {
+            signal: AbortSignal.timeout(EQUITY_FETCH_TIMEOUT_MS)
+        });
+        const data = await response.json();
+        if (data.status !== 'success') { return; }
+        equityRenderExitQueue(data);
+    } catch (error) {
+        // The queue is an alert surface, so a failed read is logged and the
+        // last known state is left on screen rather than cleared.
+        console.error('Equity exit queue load failed:', error);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table
+// ---------------------------------------------------------------------------
+
+let equityLastPayload = { holdings: [], groups: [], grouped: true };
+
+function equityRenderTable(payload, force) {
     const body = document.getElementById('equity-holdings-body');
     if (!body) { return; }
 
+    equityLastPayload = payload;
+    const rows = payload.holdings || [];
+
+    // A rebuild would discard a level the admin is part way through typing, so
+    // a background poll never redraws while a box in this table has focus. An
+    // explicit refresh, a filter change or an expand passes force and redraws
+    // regardless.
+    const active = document.activeElement;
+    if (!force && active && body.contains(active)) {
+        return;
+    }
+
     body.textContent = '';
 
-    const rows = payload.holdings || [];
-    if (rows.length === 0) {
+    if (!rows.length) {
         body.appendChild(equityMessageRow(
             'No holdings for the selected filters. Holdings appear here once the broker reports CNC delivery stock.'
         ));
         return;
+    }
+
+    function appendRow(row) {
+        body.appendChild(equityHoldingRow(row));
+        if (equityExpanded[equityRowKey(row)]) {
+            body.appendChild(equityAccountDetailRow(row));
+        }
     }
 
     // Trade Nature set to All groups the rows under a divider header per
@@ -451,14 +1413,10 @@ function equityRenderTable(payload) {
     if (payload.grouped) {
         (payload.groups || []).forEach(function (group) {
             body.appendChild(equityGroupRow(group));
-            group.rows.forEach(function (row) {
-                body.appendChild(equityHoldingRow(row));
-            });
+            (group.rows || []).forEach(appendRow);
         });
     } else {
-        rows.forEach(function (row) {
-            body.appendChild(equityHoldingRow(row));
-        });
+        rows.forEach(appendRow);
     }
 }
 
@@ -495,7 +1453,8 @@ function equityRenderNotes(payload) {
         'equity-stale-banner',
         'equity-stale-text',
         staleIds.length > 0
-            ? (staleIds.length + ' account(s) did not answer. Their rows show the last known values.')
+            ? (staleIds.length + ' account(s) did not answer. Their rows show the last known values, and a level '
+               + 'saved against a stale row may be armed against an out of date quantity.')
             : ''
     );
 
@@ -512,7 +1471,7 @@ function equityRenderNotes(payload) {
     equitySetText('equity-last-updated', 'Updated ' + EquityFormat.clockTime(payload.generated_at));
 }
 
-async function equityLoadHoldings() {
+async function equityLoadHoldings(force) {
     if (equityLoading) { return; }
     equityLoading = true;
 
@@ -536,7 +1495,7 @@ async function equityLoadHoldings() {
         }
 
         equityRenderKpi(data);
-        equityRenderTable(data);
+        equityRenderTable(data, Boolean(force));
         equityRenderNotes(data);
     } catch (error) {
         // Degrade to a visible stale marker, never blank the page.
@@ -552,11 +1511,50 @@ async function equityLoadHoldings() {
     }
 }
 
+// The monitor works on tracked holding rows, not on the broker payload this
+// table reads, so those rows are refreshed before anything is armed against
+// them. Without this a level could be armed against a stale quantity.
+async function equitySyncHoldings() {
+    try {
+        const response = await fetchWithCSRF('/equity/api/holdings/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({}),
+            signal: AbortSignal.timeout(EQUITY_WRITE_TIMEOUT_MS)
+        });
+        const data = await response.json();
+        if (data.status !== 'success') {
+            equityShowResult(
+                'The tracked holdings could not be refreshed, so a level saved now may be armed against an out of '
+                + 'date quantity. ' + (data.message || ''),
+                'warning'
+            );
+        }
+    } catch (error) {
+        equityShowResult(
+            'The tracked holdings could not be refreshed, so a level saved now may be armed against an out of date '
+            + 'quantity. Use Refresh before arming anything.',
+            'warning'
+        );
+        console.error('Equity holdings sync failed:', error);
+    }
+}
+
+async function equityRefreshAll() {
+    await equitySyncHoldings();
+    await equityLoadHoldings(true);
+    await equityLoadExitQueue();
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     {% if accounts %}
     equityUpdateExportLink();
-    equityLoadHoldings();
-    equityPollTimer = setInterval(equityLoadHoldings, EQUITY_POLL_MS);
+    equityRefreshAll();
+    equityPollTimer = setInterval(function () {
+        equityLoadHoldings(false);
+        equityLoadExitQueue();
+    }, EQUITY_POLL_MS);
     {% endif %}
 });
 
